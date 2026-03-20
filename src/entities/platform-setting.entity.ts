@@ -44,10 +44,10 @@ export class PlatformSetting {
   @JoinColumn({ name: 'updated_by_id' })
   updatedBy: User | null;
 
-  @UpdateDateColumn({ name: 'updated_at' })
+  @UpdateDateColumn({ type: 'timestamptz', name: 'updated_at' })
   updatedAt: Date;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 
   // ── Helper ─────────────────────────────────────────────────────────────────

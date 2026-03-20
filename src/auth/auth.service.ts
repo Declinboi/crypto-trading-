@@ -25,6 +25,7 @@ import {
   AuditActorType,
   NotificationType,
   NotificationChannel,
+  TwoFaMethod,
 } from '../entities/enums';
 import {
   RegisterDto,
@@ -34,10 +35,17 @@ import {
   ResetPasswordDto,
   ChangePasswordDto,
   Enable2FADto,
+  SetPinDto,
+  VerifyPinDto,
+  ChangePinDto,
+  ResetPinDto,
+  VerifyEmailOtpDto,
+  SwitchToAuthenticatorDto,
+  SwitchToEmailDto,
 } from './dto/auth.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 
-// NOTE: Replace these Maps with Redis before going to production
+// NOTE: Replace with Redis before production
 const passwordResetTokens = new Map<
   string,
   { userId: string; expiresAt: Date }
@@ -47,6 +55,13 @@ const emailVerifyTokens = new Map<
   { userId: string; expiresAt: Date }
 >();
 const refreshTokenStore = new Map<
+  string,
+  { userId: string; expiresAt: Date }
+>();
+const pinResetTokens = new Map<string, { userId: string; expiresAt: Date }>();
+
+// Tracks users who have passed password check but not OTP yet
+const pendingTwoFaStore = new Map<
   string,
   { userId: string; expiresAt: Date }
 >();
@@ -67,7 +82,7 @@ export class AuthService {
     private config: ConfigService,
   ) {}
 
-  // ── REGISTER ────────────────────────────────────────────────────────────────
+  // ── REGISTER ──────────────────────────────────────────────────────────────────
   async register(dto: RegisterDto, ipAddress?: string) {
     const existing = await this.userRepo.findOne({
       where: { email: dto.email },
@@ -82,9 +97,7 @@ export class AuthService {
       referredBy = await this.userRepo.findOne({
         where: { referralCode: dto.referralCode },
       });
-      if (!referredBy) {
-        throw new BadRequestException('Invalid referral code');
-      }
+      if (!referredBy) throw new BadRequestException('Invalid referral code');
     }
 
     const passwordHash = await argon2.hash(dto.password, {
@@ -102,11 +115,12 @@ export class AuthService {
       firstName: dto.firstName,
       lastName: dto.lastName,
       businessName: dto.businessName ?? null,
-      phone: dto.phone ?? null,
       referralCode,
       referredById: referredBy?.id ?? null,
       role: UserRole.USER,
       kycStatus: KycStatus.PENDING,
+      twoFaEnabled: true, // email OTP on by default
+      twoFaMethod: TwoFaMethod.EMAIL,
     });
 
     await this.userRepo.save(user);
@@ -144,7 +158,13 @@ export class AuthService {
     };
   }
 
-  // ── LOGIN ────────────────────────────────────────────────────────────────────
+  // ── LOGIN ─────────────────────────────────────────────────────────────────────
+  // Flow:
+  //  Step 1 — POST /auth/login { email, password }
+  //         → if email 2FA:         returns { requiresOtp: true, twoFaMethod: 'email', tempToken }
+  //         → if authenticator 2FA: returns { requiresOtp: true, twoFaMethod: 'authenticator', tempToken }
+  //  Step 2 — POST /auth/login/verify-otp { tempToken, otpCode }
+  //         → returns { accessToken, refreshToken, user }
   async login(dto: LoginDto, ipAddress?: string) {
     const user = await this.userRepo.findOne({
       where: { email: dto.email },
@@ -156,17 +176,17 @@ export class AuthService {
         'isActive',
         'isEmailVerified',
         'twoFaEnabled',
+        'twoFaMethod',
         'twoFaSecret',
         'firstName',
         'lastName',
         'kycStatus',
         'referralCode',
+        'isPinSet',
       ],
     });
 
-    if (!user) {
-      throw new UnauthorizedException('Invalid email or password');
-    }
+    if (!user) throw new UnauthorizedException('Invalid email or password');
 
     if (!user.isActive) {
       throw new ForbiddenException(
@@ -175,21 +195,37 @@ export class AuthService {
     }
 
     const passwordValid = await argon2.verify(user.passwordHash, dto.password);
-    if (!passwordValid) {
+    if (!passwordValid)
       throw new UnauthorizedException('Invalid email or password');
-    }
 
+    // ── 2FA gate ────────────────────────────────────────────────────────────────
     if (user.twoFaEnabled) {
-      if (!dto.twoFaCode) {
-        return { requiresTwoFa: true, message: 'Please provide your 2FA code' };
+      // If no OTP provided yet — send OTP (email) or prompt (authenticator)
+      if (!dto.otpCode) {
+        if (user.twoFaMethod === TwoFaMethod.EMAIL) {
+          await this.sendEmailOtp(user);
+        }
+
+        // Issue a short-lived temp token to tie Step 2 back to this user
+        const tempToken = crypto.randomBytes(32).toString('hex');
+        pendingTwoFaStore.set(tempToken, {
+          userId: user.id,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+        });
+
+        return {
+          requiresOtp: true,
+          twoFaMethod: user.twoFaMethod,
+          tempToken,
+          message:
+            user.twoFaMethod === TwoFaMethod.EMAIL
+              ? 'OTP sent to your email. Enter the code to complete login.'
+              : 'Enter the code from your authenticator app to complete login.',
+        };
       }
-      const valid = speakeasy.totp.verify({
-        secret: user.twoFaSecret!,
-        encoding: 'base32',
-        token: dto.twoFaCode,
-        window: 1,
-      });
-      if (!valid) throw new UnauthorizedException('Invalid 2FA code');
+
+      // OTP was provided inline — validate it directly
+      await this.validateOtpCode(user, dto.otpCode);
     }
 
     await this.userRepo.update(user.id, { lastLoginAt: new Date() });
@@ -205,7 +241,6 @@ export class AuthService {
     );
 
     const tokens = await this.generateTokens(user);
-
     return {
       message: 'Login successful',
       user: this.sanitizeUser(user),
@@ -213,7 +248,91 @@ export class AuthService {
     };
   }
 
-  // ── REFRESH ──────────────────────────────────────────────────────────────────
+  // ── LOGIN STEP 2: VERIFY OTP ──────────────────────────────────────────────────
+  async verifyLoginOtp(
+    tempToken: string,
+    dto: VerifyEmailOtpDto,
+    ipAddress?: string,
+  ) {
+    const pending = pendingTwoFaStore.get(tempToken);
+    if (!pending || pending.expiresAt < new Date()) {
+      throw new UnauthorizedException('Session expired. Please log in again.');
+    }
+
+    const user = await this.userRepo.findOne({
+      where: { id: pending.userId },
+      select: [
+        'id',
+        'email',
+        'role',
+        'isActive',
+        'twoFaEnabled',
+        'twoFaMethod',
+        'twoFaSecret',
+        'emailOtp',
+        'emailOtpExpiresAt',
+        'firstName',
+        'lastName',
+        'kycStatus',
+        'referralCode',
+        'isPinSet',
+      ],
+    });
+
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    await this.validateOtpCode(user, dto.otp);
+
+    pendingTwoFaStore.delete(tempToken);
+
+    await this.userRepo.update(user.id, { lastLoginAt: new Date() });
+    await this.saveAudit(
+      user.id,
+      AuditActorType.USER,
+      'user.login',
+      'users',
+      user.id,
+      null,
+      null,
+      ipAddress,
+    );
+
+    const tokens = await this.generateTokens(user);
+    return {
+      message: 'Login successful',
+      user: this.sanitizeUser(user),
+      ...tokens,
+    };
+  }
+
+  // ── RESEND LOGIN OTP ──────────────────────────────────────────────────────────
+  async resendLoginOtp(tempToken: string) {
+    const pending = pendingTwoFaStore.get(tempToken);
+    if (!pending || pending.expiresAt < new Date()) {
+      throw new UnauthorizedException('Session expired. Please log in again.');
+    }
+
+    const user = await this.userRepo.findOne({
+      where: { id: pending.userId },
+      select: ['id', 'email', 'twoFaMethod'],
+    });
+
+    if (!user) throw new NotFoundException('User not found');
+
+    if (user.twoFaMethod !== TwoFaMethod.EMAIL) {
+      throw new BadRequestException(
+        'OTP resend is only available for email 2FA',
+      );
+    }
+
+    await this.sendEmailOtp(user);
+
+    return { message: 'OTP resent to your email address' };
+  }
+
+  // ── REFRESH ───────────────────────────────────────────────────────────────────
   async refreshTokens(dto: RefreshTokenDto) {
     let payload: JwtPayload;
     try {
@@ -241,7 +360,7 @@ export class AuthService {
     return this.generateTokens(user);
   }
 
-  // ── LOGOUT ───────────────────────────────────────────────────────────────────
+  // ── LOGOUT ────────────────────────────────────────────────────────────────────
   async logout(refreshToken: string, userId: string) {
     refreshTokenStore.delete(refreshToken);
     await this.saveAudit(
@@ -254,7 +373,7 @@ export class AuthService {
     return { message: 'Logged out successfully' };
   }
 
-  // ── VERIFY EMAIL ─────────────────────────────────────────────────────────────
+  // ── VERIFY EMAIL ──────────────────────────────────────────────────────────────
   async verifyEmail(token: string) {
     const record = emailVerifyTokens.get(token);
     if (!record || record.expiresAt < new Date()) {
@@ -316,7 +435,7 @@ export class AuthService {
     const token = crypto.randomBytes(32).toString('hex');
     passwordResetTokens.set(token, {
       userId: user.id,
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 min
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
     });
 
     await this.notifRepo.save(
@@ -337,7 +456,6 @@ export class AuthService {
       'users',
       user.id,
     );
-
     return { message: 'If that email exists, a reset link has been sent.' };
   }
 
@@ -361,7 +479,6 @@ export class AuthService {
     await this.userRepo.update(user.id, { passwordHash });
     passwordResetTokens.delete(dto.token);
 
-    // Revoke all refresh tokens for security
     for (const [key, val] of refreshTokenStore.entries()) {
       if (val.userId === user.id) refreshTokenStore.delete(key);
     }
@@ -373,7 +490,6 @@ export class AuthService {
       'users',
       user.id,
     );
-
     return { message: 'Password reset successful. Please log in.' };
   }
 
@@ -409,22 +525,32 @@ export class AuthService {
       'users',
       userId,
     );
-
     return { message: 'Password changed successfully' };
   }
 
-  // ── 2FA GENERATE ─────────────────────────────────────────────────────────────
-  async generate2FASecret(userId: string) {
-    const user = await this.userRepo.findOne({ where: { id: userId } });
+  // ── 2FA: SWITCH TO AUTHENTICATOR APP ──────────────────────────────────────────
+  // Flow:
+  //   Step 1 — GET /auth/2fa/authenticator/setup  → returns secret + QR code
+  //   Step 2 — POST /auth/2fa/authenticator/confirm { code } → verifies and switches
+  async setup2FAAuthenticator(userId: string) {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['id', 'email', 'twoFaMethod'],
+    });
     if (!user) throw new NotFoundException('User not found');
-    if (user.twoFaEnabled)
-      throw new BadRequestException('2FA is already enabled');
+
+    if (user.twoFaMethod === TwoFaMethod.AUTHENTICATOR) {
+      throw new BadRequestException(
+        'You are already using an authenticator app',
+      );
+    }
 
     const secret = speakeasy.generateSecret({
       name: `CryptoPay NG (${user.email})`,
       length: 20,
     });
 
+    // Store secret temporarily — only activated after user confirms a valid code
     await this.userRepo.update(userId, { twoFaSecret: secret.base32 });
     const qrCode = await qrcode.toDataURL(secret.otpauth_url!);
 
@@ -432,22 +558,26 @@ export class AuthService {
       secret: secret.base32,
       qrCode,
       message:
-        'Scan the QR code with your authenticator app then confirm with your code',
+        'Scan the QR code in your authenticator app, then confirm with POST /auth/2fa/authenticator/confirm',
     };
   }
 
-  // ── 2FA ENABLE ───────────────────────────────────────────────────────────────
-  async enable2FA(userId: string, dto: Enable2FADto) {
+  async confirm2FAAuthenticator(userId: string, dto: SwitchToAuthenticatorDto) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
-      select: ['id', 'twoFaSecret', 'twoFaEnabled', 'email'],
+      select: ['id', 'twoFaSecret', 'twoFaMethod'],
     });
     if (!user) throw new NotFoundException('User not found');
-    if (user.twoFaEnabled)
-      throw new BadRequestException('2FA is already enabled');
+
+    if (user.twoFaMethod === TwoFaMethod.AUTHENTICATOR) {
+      throw new BadRequestException(
+        'You are already using an authenticator app',
+      );
+    }
+
     if (!user.twoFaSecret) {
       throw new BadRequestException(
-        'Generate a 2FA secret first via GET /auth/2fa/generate',
+        'Run GET /auth/2fa/authenticator/setup first',
       );
     }
 
@@ -457,50 +587,322 @@ export class AuthService {
       token: dto.code,
       window: 1,
     });
-    if (!valid) throw new BadRequestException('Invalid 2FA code');
+    if (!valid)
+      throw new BadRequestException('Invalid authenticator code. Try again.');
 
-    await this.userRepo.update(userId, { twoFaEnabled: true });
+    await this.userRepo.update(userId, {
+      twoFaMethod: TwoFaMethod.AUTHENTICATOR,
+      twoFaEnabled: true,
+      emailOtp: null,
+      emailOtpExpiresAt: null,
+    });
+
     await this.saveAudit(
       userId,
       AuditActorType.USER,
-      'user.2fa_enabled',
+      'user.2fa_switched_to_authenticator',
       'users',
       userId,
     );
 
-    return { message: '2FA enabled successfully' };
+    return { message: 'Authenticator app 2FA enabled successfully' };
   }
 
-  // ── 2FA DISABLE ──────────────────────────────────────────────────────────────
-  async disable2FA(userId: string, dto: Enable2FADto) {
+  // ── 2FA: SWITCH BACK TO EMAIL ─────────────────────────────────────────────────
+  async switchToEmail2FA(userId: string, dto: SwitchToEmailDto) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
-      select: ['id', 'twoFaSecret', 'twoFaEnabled'],
+      select: ['id', 'twoFaSecret', 'twoFaMethod'],
     });
     if (!user) throw new NotFoundException('User not found');
-    if (!user.twoFaEnabled) throw new BadRequestException('2FA is not enabled');
 
+    if (user.twoFaMethod === TwoFaMethod.EMAIL) {
+      throw new BadRequestException('You are already using email 2FA');
+    }
+
+    // Confirm with current authenticator code before switching
     const valid = speakeasy.totp.verify({
       secret: user.twoFaSecret!,
       encoding: 'base32',
       token: dto.code,
       window: 1,
     });
-    if (!valid) throw new BadRequestException('Invalid 2FA code');
+    if (!valid) throw new BadRequestException('Invalid authenticator code');
 
     await this.userRepo.update(userId, {
-      twoFaEnabled: false,
-      twoFaSecret: null,
+      twoFaMethod: TwoFaMethod.EMAIL,
+      twoFaSecret: null, // wipe the TOTP secret
     });
+
     await this.saveAudit(
       userId,
       AuditActorType.USER,
-      'user.2fa_disabled',
+      'user.2fa_switched_to_email',
       'users',
       userId,
     );
 
-    return { message: '2FA disabled successfully' };
+    return { message: 'Switched back to email 2FA successfully' };
+  }
+
+  // ── PIN: SET ──────────────────────────────────────────────────────────────────
+  async setPin(userId: string, dto: SetPinDto) {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['id', 'isPinSet'],
+    });
+    if (!user) throw new NotFoundException('User not found');
+    if (user.isPinSet) {
+      throw new BadRequestException(
+        'PIN already set. Use change-pin to update it.',
+      );
+    }
+
+    const pinHash = await argon2.hash(dto.pin, {
+      type: argon2.argon2id,
+      memoryCost: 65536,
+      timeCost: 3,
+      parallelism: 4,
+    });
+
+    await this.userRepo.update(userId, { pinHash, isPinSet: true });
+    await this.saveAudit(
+      userId,
+      AuditActorType.USER,
+      'user.pin_set',
+      'users',
+      userId,
+    );
+    return { message: 'PIN set successfully' };
+  }
+
+  // ── PIN: VERIFY ───────────────────────────────────────────────────────────────
+  async verifyPin(userId: string, dto: VerifyPinDto) {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['id', 'pinHash', 'isPinSet'],
+    });
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.isPinSet || !user.pinHash) {
+      throw new BadRequestException('No PIN has been set for this account');
+    }
+
+    const valid = await argon2.verify(user.pinHash, dto.pin);
+    if (!valid) throw new UnauthorizedException('Incorrect PIN');
+
+    await this.saveAudit(
+      userId,
+      AuditActorType.USER,
+      'user.pin_verified',
+      'users',
+      userId,
+    );
+    return { message: 'PIN verified successfully', verified: true };
+  }
+
+  // ── PIN: CHANGE ───────────────────────────────────────────────────────────────
+  async changePin(userId: string, dto: ChangePinDto) {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['id', 'pinHash', 'isPinSet'],
+    });
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.isPinSet || !user.pinHash) {
+      throw new BadRequestException('No PIN set. Use set-pin first.');
+    }
+
+    const valid = await argon2.verify(user.pinHash, dto.currentPin);
+    if (!valid) throw new BadRequestException('Current PIN is incorrect');
+
+    if (dto.currentPin === dto.newPin) {
+      throw new BadRequestException(
+        'New PIN must be different from current PIN',
+      );
+    }
+
+    const pinHash = await argon2.hash(dto.newPin, {
+      type: argon2.argon2id,
+      memoryCost: 65536,
+      timeCost: 3,
+      parallelism: 4,
+    });
+
+    await this.userRepo.update(userId, { pinHash });
+    await this.saveAudit(
+      userId,
+      AuditActorType.USER,
+      'user.pin_changed',
+      'users',
+      userId,
+    );
+    return { message: 'PIN changed successfully' };
+  }
+
+  // ── PIN: FORGOT ───────────────────────────────────────────────────────────────
+  async forgotPin(userId: string) {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['id', 'email', 'isPinSet'],
+    });
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.isPinSet) {
+      throw new BadRequestException('No PIN has been set for this account');
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    pinResetTokens.set(token, {
+      userId: user.id,
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+    });
+
+    await this.notifRepo.save(
+      this.notifRepo.create({
+        userId: user.id,
+        type: NotificationType.PAYMENT_WAITING,
+        channel: NotificationChannel.EMAIL,
+        title: 'Reset your CryptoPay NG transaction PIN',
+        body: `Reset your PIN: ${this.config.get('APP_URL')}/auth/reset-pin?token=${token}. Expires in 15 minutes.`,
+        data: { token },
+      }),
+    );
+
+    await this.saveAudit(
+      userId,
+      AuditActorType.USER,
+      'user.pin_forgot',
+      'users',
+      userId,
+    );
+    return { message: 'A PIN reset link has been sent to your email.' };
+  }
+
+  // ── PIN: RESET ────────────────────────────────────────────────────────────────
+  async resetPin(dto: ResetPinDto) {
+    const record = pinResetTokens.get(dto.token);
+    if (!record || record.expiresAt < new Date()) {
+      throw new BadRequestException('PIN reset link is invalid or has expired');
+    }
+
+    const user = await this.userRepo.findOne({ where: { id: record.userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    const pinHash = await argon2.hash(dto.pin, {
+      type: argon2.argon2id,
+      memoryCost: 65536,
+      timeCost: 3,
+      parallelism: 4,
+    });
+
+    await this.userRepo.update(user.id, { pinHash, isPinSet: true });
+    pinResetTokens.delete(dto.token);
+
+    await this.saveAudit(
+      user.id,
+      AuditActorType.USER,
+      'user.pin_reset',
+      'users',
+      user.id,
+    );
+    return { message: 'PIN reset successfully' };
+  }
+
+  // ── PIN: REMOVE ───────────────────────────────────────────────────────────────
+  async removePin(userId: string, dto: VerifyPinDto) {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['id', 'pinHash', 'isPinSet'],
+    });
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.isPinSet || !user.pinHash) {
+      throw new BadRequestException('No PIN has been set for this account');
+    }
+
+    const valid = await argon2.verify(user.pinHash, dto.pin);
+    if (!valid) throw new BadRequestException('Incorrect PIN');
+
+    await this.userRepo.update(userId, { pinHash: null, isPinSet: false });
+    await this.saveAudit(
+      userId,
+      AuditActorType.USER,
+      'user.pin_removed',
+      'users',
+      userId,
+    );
+    return { message: 'PIN removed successfully' };
+  }
+
+  // ── PRIVATE: SEND EMAIL OTP ───────────────────────────────────────────────────
+  private async sendEmailOtp(user: User) {
+    const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    await this.userRepo.update(user.id, {
+      emailOtp: otp,
+      emailOtpExpiresAt: expiresAt,
+    });
+
+    await this.notifRepo.save(
+      this.notifRepo.create({
+        userId: user.id,
+        type: NotificationType.PAYMENT_WAITING,
+        channel: NotificationChannel.EMAIL,
+        title: 'Your CryptoPay NG login code',
+        body: `Your login OTP is: ${otp}. It expires in 10 minutes. Do not share this with anyone.`,
+        data: { otp },
+      }),
+    );
+  }
+
+  // ── PRIVATE: VALIDATE OTP (works for both email and authenticator) ─────────────
+  private async validateOtpCode(user: User, code: string) {
+    if (user.twoFaMethod === TwoFaMethod.EMAIL) {
+      // Re-fetch OTP fields if not already loaded
+      const freshUser = await this.userRepo.findOne({
+        where: { id: user.id },
+        select: ['id', 'emailOtp', 'emailOtpExpiresAt'],
+      });
+
+      if (!freshUser?.emailOtp || !freshUser?.emailOtpExpiresAt) {
+        throw new UnauthorizedException(
+          'No OTP found. Please request a new one.',
+        );
+      }
+
+      if (freshUser.emailOtpExpiresAt < new Date()) {
+        throw new UnauthorizedException(
+          'OTP has expired. Please request a new one.',
+        );
+      }
+
+      if (freshUser.emailOtp !== code) {
+        throw new UnauthorizedException('Invalid OTP code');
+      }
+
+      // Clear OTP after successful use
+      await this.userRepo.update(user.id, {
+        emailOtp: null,
+        emailOtpExpiresAt: null,
+      });
+    } else {
+      // Authenticator app TOTP
+      const freshUser = await this.userRepo.findOne({
+        where: { id: user.id },
+        select: ['id', 'twoFaSecret'],
+      });
+
+      if (!freshUser?.twoFaSecret) {
+        throw new UnauthorizedException('Authenticator not configured');
+      }
+
+      const valid = speakeasy.totp.verify({
+        secret: freshUser.twoFaSecret,
+        encoding: 'base32',
+        token: code,
+        window: 1,
+      });
+
+      if (!valid) throw new UnauthorizedException('Invalid authenticator code');
+    }
   }
 
   // ── PRIVATE HELPERS ───────────────────────────────────────────────────────────
@@ -554,13 +956,14 @@ export class AuthService {
     const token = crypto.randomBytes(32).toString('hex');
     emailVerifyTokens.set(token, {
       userId,
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     });
     return token;
   }
 
   private sanitizeUser(user: User) {
-    const { passwordHash, twoFaSecret, ...safe } = user as any;
+    const { passwordHash, twoFaSecret, pinHash, emailOtp, ...safe } =
+      user as any;
     return safe;
   }
 

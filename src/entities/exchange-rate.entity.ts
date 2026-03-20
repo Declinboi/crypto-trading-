@@ -40,7 +40,7 @@ export class ExchangeRate {
   @Column({ type: 'timestamptz', name: 'expires_at' })
   expiresAt: Date;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 
   // ── Relations ──────────────────────────────────────────────────────────────

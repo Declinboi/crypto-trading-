@@ -39,7 +39,7 @@ export class InvoiceItem {
   @Column({ type: 'integer', name: 'sort_order', default: 0 })
   sortOrder: number;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 
   // ── Lifecycle Hooks ────────────────────────────────────────────────────────

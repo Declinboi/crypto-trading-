@@ -50,6 +50,6 @@ export class AuditLog {
   @Column({ type: 'text', name: 'user_agent', nullable: true })
   userAgent: string | null;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({type: 'timestamptz', name: 'created_at' } )
   createdAt: Date;
 }

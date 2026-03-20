@@ -47,16 +47,21 @@ export class BankAccount {
   @Column({ type: 'boolean', name: 'is_verified', default: false })
   isVerified: boolean; // true after Flutterwave name enquiry passes
 
-  @Column({ type: 'varchar', length: 100, name: 'flw_recipient_id', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 100,
+    name: 'flw_recipient_id',
+    nullable: true,
+  })
   flwRecipientId: string | null; // Flutterwave saved transfer recipient
 
-  @DeleteDateColumn({ name: 'deleted_at' })
+  @DeleteDateColumn({ type: 'timestamptz', name: 'deleted_at' })
   deletedAt: Date | null;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 
-  @UpdateDateColumn({ name: 'updated_at' })
+  @UpdateDateColumn({ type: 'timestamptz', name: 'updated_at' })
   updatedAt: Date;
 
   // ── Relations ──────────────────────────────────────────────────────────────

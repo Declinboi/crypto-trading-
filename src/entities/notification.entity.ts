@@ -52,6 +52,6 @@ export class Notification {
   @Column({ type: 'varchar', length: 255, name: 'provider_ref', nullable: true })
   providerRef: string | null; // Sendgrid message ID or Termii SMS ID
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 }

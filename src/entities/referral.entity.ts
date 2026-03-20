@@ -35,10 +35,20 @@ export class Referral {
   @Column({ type: 'varchar', length: 20, name: 'referral_code' })
   referralCode: string; // code that was used at signup
 
-  @Column({ type: 'enum', enum: ReferralStatus, default: ReferralStatus.PENDING })
+  @Column({
+    type: 'enum',
+    enum: ReferralStatus,
+    default: ReferralStatus.PENDING,
+  })
   status: ReferralStatus;
 
-  @Column({ type: 'numeric', precision: 18, scale: 2, name: 'reward_amount_ngn', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    name: 'reward_amount_ngn',
+    nullable: true,
+  })
   rewardAmountNgn: number | null;
 
   @Column({ type: 'timestamptz', name: 'rewarded_at', nullable: true })
@@ -47,6 +57,6 @@ export class Referral {
   @Column({ type: 'timestamptz', name: 'qualified_at', nullable: true })
   qualifiedAt: Date | null; // when referred user paid their first invoice
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 }

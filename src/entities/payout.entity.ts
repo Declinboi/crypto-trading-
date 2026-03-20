@@ -47,7 +47,13 @@ export class Payout {
   @Column({ type: 'numeric', precision: 18, scale: 2, name: 'amount_ngn' })
   amountNgn: number; // gross NGN before Flutterwave fee
 
-  @Column({ type: 'numeric', precision: 18, scale: 2, name: 'fee_ngn', default: 0 })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    name: 'fee_ngn',
+    default: 0,
+  })
   feeNgn: number; // Flutterwave transfer fee
 
   @Column({ type: 'numeric', precision: 18, scale: 2, name: 'net_amount_ngn' })
@@ -60,10 +66,20 @@ export class Payout {
   })
   status: PayoutStatus;
 
-  @Column({ type: 'varchar', length: 100, name: 'flw_transfer_id', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 100,
+    name: 'flw_transfer_id',
+    nullable: true,
+  })
   flwTransferId: string | null;
 
-  @Column({ type: 'varchar', length: 100, name: 'flw_reference', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 100,
+    name: 'flw_reference',
+    nullable: true,
+  })
   flwReference: string | null; // unique reference sent to Flutterwave
 
   @Column({ type: 'varchar', length: 50, name: 'flw_status', nullable: true })
@@ -87,9 +103,9 @@ export class Payout {
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, any> | null; // raw Flutterwave webhook payload
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 
-  @UpdateDateColumn({ name: 'updated_at' })
+  @UpdateDateColumn({ type: 'timestamptz', name: 'updated_at' })
   updatedAt: Date;
 }

@@ -29,7 +29,9 @@ export class WalletAddress {
   @Column({ type: 'uuid', name: 'invoice_id', nullable: true })
   invoiceId: string | null;
 
-  @ManyToOne(() => Invoice, (invoice) => invoice.walletAddresses, { nullable: true })
+  @ManyToOne(() => Invoice, (invoice) => invoice.walletAddresses, {
+    nullable: true,
+  })
   @JoinColumn({ name: 'invoice_id' })
   invoice: Invoice | null;
 
@@ -42,15 +44,25 @@ export class WalletAddress {
   @Column({ type: 'varchar', length: 255, unique: true })
   address: string;
 
-  @Column({ type: 'varchar', length: 100, name: 'derivation_path', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 100,
+    name: 'derivation_path',
+    nullable: true,
+  })
   derivationPath: string | null; // BIP44 path if using HD wallet
 
   @Column({ type: 'boolean', name: 'is_used', default: false })
   isUsed: boolean;
 
-  @Column({ type: 'varchar', length: 100, name: 'nowpayments_ref', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 100,
+    name: 'nowpayments_ref',
+    nullable: true,
+  })
   nowpaymentsRef: string | null;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 }

@@ -39,7 +39,12 @@ export class Transaction {
   @JoinColumn({ name: 'user_id' })
   user: User;
 
-  @Column({ type: 'varchar', length: 100, name: 'nowpayments_payment_id', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 100,
+    name: 'nowpayments_payment_id',
+    nullable: true,
+  })
   nowpaymentsPaymentId: string | null;
 
   @Column({ type: 'varchar', length: 255, name: 'tx_hash', nullable: true })
@@ -51,16 +56,33 @@ export class Transaction {
   @Column({ type: 'enum', enum: NetworkType })
   network: NetworkType;
 
-  @Column({ type: 'numeric', precision: 28, scale: 10, name: 'crypto_amount_expected' })
+  @Column({
+    type: 'numeric',
+    precision: 28,
+    scale: 10,
+    name: 'crypto_amount_expected',
+  })
   cryptoAmountExpected: number;
 
-  @Column({ type: 'numeric', precision: 28, scale: 10, name: 'crypto_amount_received', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 28,
+    scale: 10,
+    name: 'crypto_amount_received',
+    nullable: true,
+  })
   cryptoAmountReceived: number | null;
 
   @Column({ type: 'numeric', precision: 18, scale: 2, name: 'usd_amount' })
   usdAmount: number;
 
-  @Column({ type: 'numeric', precision: 18, scale: 2, name: 'ngn_amount', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    name: 'ngn_amount',
+    nullable: true,
+  })
   ngnAmount: number | null;
 
   @Column({ type: 'uuid', name: 'exchange_rate_id', nullable: true })
@@ -70,16 +92,40 @@ export class Transaction {
   @JoinColumn({ name: 'exchange_rate_id' })
   exchangeRate: ExchangeRate | null;
 
-  @Column({ type: 'numeric', precision: 18, scale: 4, name: 'usd_to_ngn_rate', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 4,
+    name: 'usd_to_ngn_rate',
+    nullable: true,
+  })
   usdToNgnRate: number | null; // snapshot at time of conversion
 
-  @Column({ type: 'numeric', precision: 18, scale: 4, name: 'platform_fee_usd', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 4,
+    name: 'platform_fee_usd',
+    nullable: true,
+  })
   platformFeeUsd: number | null;
 
-  @Column({ type: 'numeric', precision: 18, scale: 2, name: 'platform_fee_ngn', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    name: 'platform_fee_ngn',
+    nullable: true,
+  })
   platformFeeNgn: number | null;
 
-  @Column({ type: 'numeric', precision: 18, scale: 2, name: 'net_ngn_amount', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    name: 'net_ngn_amount',
+    nullable: true,
+  })
   netNgnAmount: number | null; // amount after fees, credited to user
 
   @Column({
@@ -98,16 +144,21 @@ export class Transaction {
   @Column({ type: 'timestamptz', name: 'confirmed_at', nullable: true })
   confirmedAt: Date | null;
 
-  @Column({ type: 'varchar', length: 50, name: 'nowpayments_status', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 50,
+    name: 'nowpayments_status',
+    nullable: true,
+  })
   nowpaymentsStatus: string | null; // raw status string from NowPayments
 
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, any> | null; // raw NowPayments webhook payload
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 
-  @UpdateDateColumn({ name: 'updated_at' })
+  @UpdateDateColumn({ type: 'timestamptz', name: 'updated_at' })
   updatedAt: Date;
 
   // ── Relations ──────────────────────────────────────────────────────────────

@@ -22,7 +22,12 @@ export class WebhookEvent {
   eventType: string;
   // e.g. payment.waiting | payment.confirmed | transfer.success
 
-  @Column({ type: 'varchar', length: 255, name: 'external_ref', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 255,
+    name: 'external_ref',
+    nullable: true,
+  })
   externalRef: string | null;
   // NowPayments payment_id or Flutterwave transfer_id
 
@@ -41,9 +46,14 @@ export class WebhookEvent {
   @Column({ type: 'text', name: 'processing_error', nullable: true })
   processingError: string | null;
 
-  @Column({ type: 'varchar', length: 255, name: 'idempotency_key', unique: true })
+  @Column({
+    type: 'varchar',
+    length: 255,
+    name: 'idempotency_key',
+    unique: true,
+  })
   idempotencyKey: string; // prevents duplicate processing
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 }

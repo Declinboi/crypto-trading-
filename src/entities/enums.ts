@@ -4,6 +4,11 @@ export enum UserRole {
   SUPER_ADMIN = 'super_admin',
 }
 
+export enum TwoFaMethod {
+  EMAIL = 'email',
+  AUTHENTICATOR = 'authenticator',
+}
+
 export enum KycStatus {
   PENDING = 'pending',
   SUBMITTED = 'submitted',

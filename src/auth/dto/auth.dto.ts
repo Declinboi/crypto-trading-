@@ -66,7 +66,30 @@ export class LoginDto {
   @IsOptional()
   @IsString()
   @MaxLength(6)
-  twoFaCode?: string;
+  otpCode?: string; // works for both email OTP and authenticator TOTP
+}
+
+export class VerifyEmailOtpDto {
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^\d{6}$/, { message: 'OTP must be 6 numeric digits' })
+  otp: string;
+}
+
+export class SwitchToAuthenticatorDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(6)
+  @Matches(/^\d{6}$/, { message: 'Code must be 6 numeric digits' })
+  code: string; // TOTP code to confirm before switching
+}
+
+export class SwitchToEmailDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(6)
+  @Matches(/^\d{6}$/, { message: 'Code must be 6 numeric digits' })
+  code: string; // current authenticator TOTP to confirm before switching back
 }
 
 export class RefreshTokenDto {
@@ -128,4 +151,45 @@ export class Enable2FADto {
   @IsNotEmpty()
   @MaxLength(6)
   code: string;
+}
+
+// ── PIN DTOs ──────────────────────────────────────────────────────────────────
+export class SetPinDto {
+  @IsString()
+  @MinLength(4, { message: 'PIN must be exactly 4 digits' })
+  @MaxLength(4, { message: 'PIN must be exactly 4 digits' })
+  @Matches(/^\d{4}$/, { message: 'PIN must be 4 numeric digits only' })
+  pin: string;
+}
+
+export class VerifyPinDto {
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^\d{4}$/, { message: 'PIN must be 4 numeric digits only' })
+  pin: string;
+}
+
+export class ChangePinDto {
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^\d{4}$/, { message: 'Current PIN must be 4 numeric digits' })
+  currentPin: string;
+
+  @IsString()
+  @MinLength(4)
+  @MaxLength(4)
+  @Matches(/^\d{4}$/, { message: 'New PIN must be 4 numeric digits only' })
+  newPin: string;
+}
+
+export class ResetPinDto {
+  @IsString()
+  @IsNotEmpty({ message: 'Reset token is required' })
+  token: string;
+
+  @IsString()
+  @MinLength(4)
+  @MaxLength(4)
+  @Matches(/^\d{4}$/, { message: 'PIN must be 4 numeric digits only' })
+  pin: string;
 }

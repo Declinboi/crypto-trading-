@@ -45,22 +45,52 @@ export class SystemWalletTransaction {
   @Column({ type: 'enum', enum: CoinType, nullable: true })
   coin: CoinType | null;
 
-  @Column({ type: 'numeric', precision: 28, scale: 10, name: 'amount_crypto', default: 0 })
+  @Column({
+    type: 'numeric',
+    precision: 28,
+    scale: 10,
+    name: 'amount_crypto',
+    default: 0,
+  })
   amountCrypto: number;
   // positive = inflow, negative = outflow
 
-  @Column({ type: 'numeric', precision: 18, scale: 2, name: 'amount_usd', default: 0 })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    name: 'amount_usd',
+    default: 0,
+  })
   amountUsd: number;
 
-  @Column({ type: 'numeric', precision: 18, scale: 2, name: 'amount_ngn', default: 0 })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    name: 'amount_ngn',
+    default: 0,
+  })
   amountNgn: number;
   // populated for payout_reserve and reconciliation entries
 
-  @Column({ type: 'numeric', precision: 28, scale: 10, name: 'balance_before', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 28,
+    scale: 10,
+    name: 'balance_before',
+    nullable: true,
+  })
   balanceBefore: number | null;
   // snapshot of wallet balance before this entry
 
-  @Column({ type: 'numeric', precision: 28, scale: 10, name: 'balance_after', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 28,
+    scale: 10,
+    name: 'balance_after',
+    nullable: true,
+  })
   balanceAfter: number | null;
   // snapshot of wallet balance after this entry
 
@@ -84,7 +114,13 @@ export class SystemWalletTransaction {
   @JoinColumn({ name: 'payout_id' })
   payout: Payout | null;
 
-  @Column({ type: 'numeric', precision: 18, scale: 4, name: 'usd_rate_snapshot', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 4,
+    name: 'usd_rate_snapshot',
+    nullable: true,
+  })
   usdRateSnapshot: number | null;
   // USD/NGN rate at time of this entry
 
@@ -99,6 +135,6 @@ export class SystemWalletTransaction {
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, any> | null;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 }

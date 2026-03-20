@@ -42,13 +42,24 @@ export class Invoice {
   @Column({ type: 'varchar', length: 200, name: 'client_name', nullable: true })
   clientName: string | null;
 
-  @Column({ type: 'varchar', length: 255, name: 'client_email', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 255,
+    name: 'client_email',
+    nullable: true,
+  })
   clientEmail: string | null;
 
   @Column({ type: 'numeric', precision: 18, scale: 2, name: 'amount_usd' })
   amountUsd: number;
 
-  @Column({ type: 'numeric', precision: 18, scale: 2, name: 'amount_ngn', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    name: 'amount_ngn',
+    nullable: true,
+  })
   amountNgn: number | null;
 
   @Column({
@@ -66,16 +77,32 @@ export class Invoice {
   })
   selectedCoin: CoinType | null;
 
-  @Column({ type: 'numeric', precision: 28, scale: 10, name: 'crypto_amount', nullable: true })
+  @Column({
+    type: 'numeric',
+    precision: 28,
+    scale: 10,
+    name: 'crypto_amount',
+    nullable: true,
+  })
   cryptoAmount: number | null;
 
-  @Column({ type: 'varchar', length: 100, name: 'nowpayments_invoice_id', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 100,
+    name: 'nowpayments_invoice_id',
+    nullable: true,
+  })
   nowpaymentsInvoiceId: string | null;
 
   @Column({ type: 'text', name: 'payment_url', nullable: true })
   paymentUrl: string | null;
 
-  @Column({ type: 'varchar', length: 255, name: 'payment_address', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 255,
+    name: 'payment_address',
+    nullable: true,
+  })
   paymentAddress: string | null;
 
   @Column({ type: 'text', name: 'qr_code_url', nullable: true })
@@ -100,13 +127,13 @@ export class Invoice {
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, any> | null;
 
-  @DeleteDateColumn({ name: 'deleted_at' })
+  @DeleteDateColumn({ type: 'timestamptz', name: 'deleted_at' })
   deletedAt: Date | null;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 
-  @UpdateDateColumn({ name: 'updated_at' })
+  @UpdateDateColumn({ type: 'timestamptz', name: 'updated_at' })
   updatedAt: Date;
 
   // ── Relations ──────────────────────────────────────────────────────────────

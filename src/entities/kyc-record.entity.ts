@@ -71,9 +71,9 @@ export class KycRecord {
   @Column({ type: 'varchar', length: 255, name: 'provider_ref', nullable: true })
   providerRef: string | null;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 
-  @UpdateDateColumn({ name: 'updated_at' })
+  @UpdateDateColumn({ type: 'timestamptz', name: 'updated_at' })
   updatedAt: Date;
 }

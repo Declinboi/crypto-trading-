@@ -61,7 +61,6 @@ export class InitSchema1700000000000 implements MigrationInterface {
       CREATE TABLE "users" (
         "id"                  UUID        NOT NULL DEFAULT gen_random_uuid(),
         "email"               VARCHAR(255) NOT NULL,
-        "phone"               VARCHAR(20),
         "password_hash"       VARCHAR(255) NOT NULL,
         "first_name"          VARCHAR(100) NOT NULL,
         "last_name"           VARCHAR(100) NOT NULL,

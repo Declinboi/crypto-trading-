@@ -10,7 +10,7 @@ import {
   JoinColumn,
   Index,
 } from 'typeorm';
-import { UserRole, KycStatus } from './enums';
+import { UserRole, KycStatus, TwoFaMethod } from './enums';
 import { Invoice } from './invoice.entity';
 import { BankAccount } from './bank-account.entity';
 import { WalletAddress } from './wallet-address.entity';
@@ -29,9 +29,6 @@ export class User {
 
   @Column({ type: 'varchar', length: 255, unique: true })
   email: string;
-
-  @Column({ type: 'varchar', length: 20, nullable: true })
-  phone: string | null;
 
   @Column({ type: 'varchar', length: 255, name: 'password_hash' })
   passwordHash: string;
@@ -70,11 +67,16 @@ export class User {
   @Column({ type: 'boolean', name: 'is_email_verified', default: false })
   isEmailVerified: boolean;
 
-  @Column({ type: 'boolean', name: 'is_phone_verified', default: false })
-  isPhoneVerified: boolean;
+  @Column({
+    type: 'enum',
+    enum: TwoFaMethod,
+    name: 'two_fa_method',
+    default: TwoFaMethod.EMAIL,
+  })
+  twoFaMethod: TwoFaMethod;
 
-  @Column({ type: 'boolean', name: 'two_fa_enabled', default: false })
-  twoFaEnabled: boolean;
+  @Column({ type: 'boolean', name: 'two_fa_enabled', default: true })
+  twoFaEnabled: boolean; // always true by default since email OTP is default
 
   @Column({
     type: 'varchar',
@@ -82,7 +84,19 @@ export class User {
     name: 'two_fa_secret',
     nullable: true,
   })
-  twoFaSecret: string | null;
+  twoFaSecret: string | null; // only populated when using authenticator app
+
+  @Column({ type: 'varchar', length: 10, name: 'email_otp', nullable: true })
+  emailOtp: string | null; // current email OTP code
+
+  @Column({ type: 'timestamptz', name: 'email_otp_expires_at', nullable: true })
+  emailOtpExpiresAt: Date | null; // OTP expiry
+
+  @Column({ type: 'varchar', length: 255, name: 'pin_hash', nullable: true })
+  pinHash: string | null;
+
+  @Column({ type: 'boolean', name: 'is_pin_set', default: false })
+  isPinSet: boolean;
 
   @Column({ type: 'varchar', length: 20, name: 'referral_code', unique: true })
   referralCode: string;
@@ -100,13 +114,13 @@ export class User {
   @Column({ type: 'timestamptz', name: 'last_login_at', nullable: true })
   lastLoginAt: Date | null;
 
-  @DeleteDateColumn({ name: 'deleted_at' })
+  @DeleteDateColumn({ type: 'timestamptz', name: 'deleted_at' })
   deletedAt: Date | null;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
 
-  @UpdateDateColumn({ name: 'updated_at' })
+  @UpdateDateColumn({ type: 'timestamptz', name: 'updated_at' })
   updatedAt: Date;
 
   // ── Relations ──────────────────────────────────────────────────────────────
