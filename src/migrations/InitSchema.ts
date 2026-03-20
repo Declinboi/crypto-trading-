@@ -485,33 +485,87 @@ export class InitSchema1700000000000 implements MigrationInterface {
     `);
 
     // ── Indexes ───────────────────────────────────────────────────────────────
-    await queryRunner.query(`CREATE INDEX "IDX_kyc_records_user_id" ON "kyc_records" ("user_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_bank_accounts_user_id" ON "bank_accounts" ("user_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_invoices_user_status" ON "invoices" ("user_id", "status")`);
-    await queryRunner.query(`CREATE INDEX "IDX_invoices_nowpayments" ON "invoices" ("nowpayments_invoice_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_wallet_addresses_user" ON "wallet_addresses" ("user_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_wallet_addresses_invoice" ON "wallet_addresses" ("invoice_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_exchange_rates_coin_date" ON "exchange_rates" ("coin", "fetched_at" DESC)`);
-    await queryRunner.query(`CREATE INDEX "IDX_rate_locks_expires" ON "rate_locks" ("expires_at")`);
-    await queryRunner.query(`CREATE INDEX "IDX_transactions_invoice" ON "transactions" ("invoice_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_transactions_user" ON "transactions" ("user_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_transactions_tx_hash" ON "transactions" ("tx_hash")`);
-    await queryRunner.query(`CREATE INDEX "IDX_transactions_nowpayments" ON "transactions" ("nowpayments_payment_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_transactions_status" ON "transactions" ("status")`);
-    await queryRunner.query(`CREATE INDEX "IDX_payouts_user" ON "payouts" ("user_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_payouts_status" ON "payouts" ("status")`);
-    await queryRunner.query(`CREATE INDEX "IDX_payouts_flw_transfer" ON "payouts" ("flw_transfer_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_webhook_events_external_ref" ON "webhook_events" ("external_ref")`);
-    await queryRunner.query(`CREATE INDEX "IDX_webhook_events_processed" ON "webhook_events" ("processed")`);
-    await queryRunner.query(`CREATE INDEX "IDX_notifications_user_read" ON "notifications" ("user_id", "is_read")`);
-    await queryRunner.query(`CREATE INDEX "IDX_notifications_user_date" ON "notifications" ("user_id", "created_at")`);
-    await queryRunner.query(`CREATE INDEX "IDX_audit_logs_entity" ON "audit_logs" ("entity_type", "entity_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_audit_logs_user" ON "audit_logs" ("user_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_referrals_referrer" ON "referrals" ("referrer_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_system_wallets_coin_network" ON "system_wallets" ("coin", "network", "status")`);
-    await queryRunner.query(`CREATE INDEX "IDX_swt_wallet_date" ON "system_wallet_transactions" ("system_wallet_id", "created_at")`);
-    await queryRunner.query(`CREATE INDEX "IDX_swt_type" ON "system_wallet_transactions" ("type")`);
-    await queryRunner.query(`CREATE INDEX "IDX_swt_tx_hash" ON "system_wallet_transactions" ("tx_hash")`);
+    await queryRunner.query(
+      `CREATE INDEX "IDX_kyc_records_user_id" ON "kyc_records" ("user_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_bank_accounts_user_id" ON "bank_accounts" ("user_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_invoices_user_status" ON "invoices" ("user_id", "status")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_invoices_nowpayments" ON "invoices" ("nowpayments_invoice_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_wallet_addresses_user" ON "wallet_addresses" ("user_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_wallet_addresses_invoice" ON "wallet_addresses" ("invoice_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_exchange_rates_coin_date" ON "exchange_rates" ("coin", "fetched_at" DESC)`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_rate_locks_expires" ON "rate_locks" ("expires_at")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_transactions_invoice" ON "transactions" ("invoice_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_transactions_user" ON "transactions" ("user_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_transactions_tx_hash" ON "transactions" ("tx_hash")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_transactions_nowpayments" ON "transactions" ("nowpayments_payment_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_transactions_status" ON "transactions" ("status")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_payouts_user" ON "payouts" ("user_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_payouts_status" ON "payouts" ("status")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_payouts_flw_transfer" ON "payouts" ("flw_transfer_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_webhook_events_external_ref" ON "webhook_events" ("external_ref")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_webhook_events_processed" ON "webhook_events" ("processed")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_notifications_user_read" ON "notifications" ("user_id", "is_read")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_notifications_user_date" ON "notifications" ("user_id", "created_at")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_audit_logs_entity" ON "audit_logs" ("entity_type", "entity_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_audit_logs_user" ON "audit_logs" ("user_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_referrals_referrer" ON "referrals" ("referrer_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_system_wallets_coin_network" ON "system_wallets" ("coin", "network", "status")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_swt_wallet_date" ON "system_wallet_transactions" ("system_wallet_id", "created_at")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_swt_type" ON "system_wallet_transactions" ("type")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_swt_tx_hash" ON "system_wallet_transactions" ("tx_hash")`,
+    );
 
     // ── Seed default platform settings ────────────────────────────────────────
     await queryRunner.query(`
@@ -529,7 +583,9 @@ export class InitSchema1700000000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP TABLE IF EXISTS "system_wallet_transactions" CASCADE`);
+    await queryRunner.query(
+      `DROP TABLE IF EXISTS "system_wallet_transactions" CASCADE`,
+    );
     await queryRunner.query(`DROP TABLE IF EXISTS "system_wallets" CASCADE`);
     await queryRunner.query(`DROP TABLE IF EXISTS "platform_settings" CASCADE`);
     await queryRunner.query(`DROP TABLE IF EXISTS "referrals" CASCADE`);

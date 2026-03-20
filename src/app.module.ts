@@ -10,7 +10,7 @@ import { AuthModule } from './auth/auth.module';
       envFilePath: '.env',
     }),
     DatabaseModule,
-     AuthModule,
+    AuthModule,
   ],
   controllers: [],
   providers: [],

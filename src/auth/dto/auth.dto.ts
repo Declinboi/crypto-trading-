@@ -18,13 +18,10 @@ export class RegisterDto {
   @IsString()
   @MinLength(8, { message: 'Password must be at least 8 characters' })
   @MaxLength(64, { message: 'Password must not exceed 64 characters' })
-  @Matches(
-    /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
-    {
-      message:
-        'Password must contain uppercase, lowercase, number and special character',
-    },
-  )
+  @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/, {
+    message:
+      'Password must contain uppercase, lowercase, number and special character',
+  })
   password: string;
 
   @IsString()
@@ -46,7 +43,9 @@ export class RegisterDto {
   businessName?: string;
 
   @IsOptional()
-  @IsPhoneNumber('NG', { message: 'Please provide a valid Nigerian phone number' })
+  @IsPhoneNumber('NG', {
+    message: 'Please provide a valid Nigerian phone number',
+  })
   phone?: string;
 
   @IsOptional()
@@ -102,13 +101,10 @@ export class ResetPasswordDto {
   @IsString()
   @MinLength(8, { message: 'Password must be at least 8 characters' })
   @MaxLength(64)
-  @Matches(
-    /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
-    {
-      message:
-        'Password must contain uppercase, lowercase, number and special character',
-    },
-  )
+  @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/, {
+    message:
+      'Password must contain uppercase, lowercase, number and special character',
+  })
   password: string;
 }
 
@@ -120,13 +116,10 @@ export class ChangePasswordDto {
   @IsString()
   @MinLength(8)
   @MaxLength(64)
-  @Matches(
-    /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
-    {
-      message:
-        'Password must contain uppercase, lowercase, number and special character',
-    },
-  )
+  @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/, {
+    message:
+      'Password must contain uppercase, lowercase, number and special character',
+  })
   newPassword: string;
 }
 

@@ -42,7 +42,12 @@ export class User {
   @Column({ type: 'varchar', length: 100, name: 'last_name' })
   lastName: string;
 
-  @Column({ type: 'varchar', length: 200, name: 'business_name', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 200,
+    name: 'business_name',
+    nullable: true,
+  })
   businessName: string | null;
 
   @Column({ type: 'text', name: 'avatar_url', nullable: true })
@@ -71,7 +76,12 @@ export class User {
   @Column({ type: 'boolean', name: 'two_fa_enabled', default: false })
   twoFaEnabled: boolean;
 
-  @Column({ type: 'varchar', length: 100, name: 'two_fa_secret', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 100,
+    name: 'two_fa_secret',
+    nullable: true,
+  })
   twoFaSecret: string | null;
 
   @Column({ type: 'varchar', length: 20, name: 'referral_code', unique: true })

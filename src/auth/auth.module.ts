@@ -25,7 +25,8 @@ import { Notification } from '../entities/notification.entity';
       useFactory: (config: ConfigService) => ({
         secret: config.get<string>('JWT_SECRET') as string,
         signOptions: {
-          expiresIn: (config.get<string>('JWT_EXPIRES_IN') ?? '15m') as `${number}${'s' | 'm' | 'h' | 'd'}`,
+          expiresIn: (config.get<string>('JWT_EXPIRES_IN') ??
+            '15m') as `${number}${'s' | 'm' | 'h' | 'd'}`,
         },
       }),
     }),
