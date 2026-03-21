@@ -19,7 +19,7 @@ export enum PayoutPriority {
 export class InitiatePayoutDto {
   @IsUUID()
   @IsNotEmpty()
-  transactionId: string;
+  transactionId: string ;
 
   @IsUUID()
   @IsNotEmpty()

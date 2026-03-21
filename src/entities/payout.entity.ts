@@ -23,12 +23,18 @@ export class Payout {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid', name: 'transaction_id', unique: true })
-  transactionId: string;
+  // ── To this ───────────────────────────────────────────────────────────────────
+  @Column({
+    type: 'uuid',
+    name: 'transaction_id',
+    unique: true,
+    nullable: true,
+  })
+  transactionId: string | null;
 
-  @OneToOne(() => Transaction, (tx) => tx.payout)
+  @OneToOne(() => Transaction, (tx) => tx.payout, { nullable: true })
   @JoinColumn({ name: 'transaction_id' })
-  transaction: Transaction;
+  transaction: Transaction | null;
 
   @Column({ type: 'uuid', name: 'user_id' })
   userId: string;

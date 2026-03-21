@@ -11,6 +11,7 @@ import { WebhookEvent } from '../entities/webhook-event.entity';
 import { Notification } from '../entities/notification.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { SystemWalletModule } from '../system-wallet/system-wallet.module';
+import { WalletModule } from 'src/wallet/wallet.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { SystemWalletModule } from '../system-wallet/system-wallet.module';
       AuditLog,
     ]),
     SystemWalletModule,
+    WalletModule, 
   ],
   controllers: [NowpaymentsController],
   providers: [NowpaymentsService],

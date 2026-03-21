@@ -6,6 +6,7 @@ import { KycModule } from './kyc/kyc.module';
 import { SystemWalletModule } from './system-wallet/system-wallet.module';
 import { NowpaymentsModule } from './nowpayments/nowpayments.module';
 import { FlutterwaveModule } from './flutterwave/flutterwave.module';
+import { WalletModule } from './wallet/wallet.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { FlutterwaveModule } from './flutterwave/flutterwave.module';
     SystemWalletModule,
     NowpaymentsModule,
     FlutterwaveModule,
+    WalletModule,
   ],
   controllers: [],
   providers: [],

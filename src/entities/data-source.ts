@@ -18,6 +18,8 @@ import { Referral } from './/referral.entity';
 import { PlatformSetting } from './/platform-setting.entity';
 import { SystemWallet } from './/system-wallet.entity';
 import { SystemWalletTransaction } from './/system-wallet-transaction.entity';
+import { UserWallet } from './user-wallet.entity';
+import { WalletTransaction } from './wallet-transaction.entity';
 
 export const ALL_ENTITIES = [
   User,
@@ -37,6 +39,8 @@ export const ALL_ENTITIES = [
   PlatformSetting,
   SystemWallet,
   SystemWalletTransaction,
+  UserWallet,
+  WalletTransaction,
 ];
 
 // ── Used by NestJS TypeOrmModule.forRootAsync() ───────────────────────────────

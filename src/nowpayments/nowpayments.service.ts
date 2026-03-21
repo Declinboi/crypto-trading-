@@ -32,6 +32,7 @@ import {
   RateSource,
 } from '../entities/enums';
 import { NowpaymentsWebhookDto } from './dto/nowpayments.dto';
+import { WalletService } from 'src/wallet/wallet.service';
 
 // NowPayments coin → our CoinType mapping
 const COIN_MAP: Record<string, CoinType> = {
@@ -70,6 +71,7 @@ export class NowpaymentsService {
 
   constructor(
     private config: ConfigService,
+    private walletService: WalletService,
 
     @InjectRepository(Invoice)
     private invoiceRepo: Repository<Invoice>,
@@ -681,38 +683,24 @@ export class NowpaymentsService {
 
     const cryptoReceived = Number(dto.actually_paid ?? dto.pay_amount);
     const usdReceived = cryptoReceived * Number(rate.coinUsdPrice);
-
-    // ── FEE CALCULATION ──────────────────────────────────────────────────────────
-    // Read platform fee percent from settings (default 1.5%)
-    // The FX spread (built into effectiveUsdNgn) is the primary revenue.
-    // This additional fee is charged ON TOP of the spread.
     const feePercent = await this.getPlatformFeePercent();
 
-    // Step 1: Convert crypto → NGN using the effective rate (spread already applied)
+    // ── NGN conversion (one-time, final — no more exchange rate after this) ────
     const grossNgnAmount = usdReceived * Number(rate.effectiveUsdNgn);
-
-    // Step 2: Calculate fee in NGN
     const platformFeeNgn = grossNgnAmount * (feePercent / 100);
-
-    // Step 3: Calculate fee in USD (for bookkeeping)
     const platformFeeUsd = usdReceived * (feePercent / 100);
-
-    // Step 4: Calculate fee in crypto (for system wallet credit)
     const platformFeeCrypto = cryptoReceived * (feePercent / 100);
-
-    // Step 5: Net NGN user receives after fee deduction
     const netNgnAmount = grossNgnAmount - platformFeeNgn;
 
     this.logger.log(
-      `Fee breakdown: gross_ngn=${grossNgnAmount.toFixed(2)} fee_percent=${feePercent}% fee_ngn=${platformFeeNgn.toFixed(2)} net_ngn=${netNgnAmount.toFixed(2)}`,
+      `Fee breakdown: gross_ngn=₦${grossNgnAmount.toFixed(2)} fee=${feePercent}% fee_ngn=₦${platformFeeNgn.toFixed(2)} net_ngn=₦${netNgnAmount.toFixed(2)}`,
     );
 
-    // ── DB TRANSACTION ────────────────────────────────────────────────────────────
+    // ── DB transaction ─────────────────────────────────────────────────────────
     await this.dataSource.transaction(async (manager) => {
       const invoiceRepo = manager.getRepository(Invoice);
       const txRepo = manager.getRepository(Transaction);
 
-      // Update transaction with all amounts
       await txRepo.update(transaction.id, {
         status: TransactionStatus.CONFIRMED,
         cryptoAmountReceived: cryptoReceived,
@@ -726,21 +714,18 @@ export class NowpaymentsService {
         nowpaymentsStatus: dto.payment_status,
       });
 
-      // Mark invoice as paid with gross NGN
       await invoiceRepo.update(invoice.id, {
         status: InvoiceStatus.PAID,
         amountNgn: grossNgnAmount,
         paidAt: new Date(),
       });
 
-      // Mark rate lock as used
       await manager
         .getRepository(RateLock)
         .update({ invoiceId: invoice.id }, { usedAt: new Date() });
     });
 
-    // ── CREDIT FEE TO SYSTEM WALLET ───────────────────────────────────────────────
-    // Only credit if there is actually a fee to collect
+    // ── Credit platform fee to system wallet ──────────────────────────────────
     if (platformFeeCrypto > 0) {
       try {
         await this.systemWalletService.creditFee(
@@ -748,26 +733,41 @@ export class NowpaymentsService {
           platformFeeCrypto,
           platformFeeUsd,
           transaction.id,
-          `${feePercent}% platform fee for invoice ${invoice.invoiceNumber} — ${cryptoReceived} ${transaction.coin} received`,
-        );
-
-        this.logger.log(
-          `Fee credited to system wallet: ${platformFeeCrypto} ${transaction.coin} ($${platformFeeUsd.toFixed(2)}) for invoice ${invoice.invoiceNumber}`,
+          `${feePercent}% platform fee for invoice ${invoice.invoiceNumber}`,
         );
       } catch (err) {
-        // Don't block payout if fee credit fails — log and alert
         this.logger.error(
-          `Failed to credit fee to system wallet: ${err.message}. invoice=${invoice.id}`,
+          `Failed to credit fee to system wallet: ${err.message}`,
         );
       }
     }
 
-    // ── NOTIFY USER ───────────────────────────────────────────────────────────────
+    // ── Credit NET NGN directly into user's wallet (already converted, no more FX) ─
+    try {
+      await this.walletService.creditWallet(
+        invoice.userId,
+        netNgnAmount,
+        `Payment received for invoice ${invoice.invoiceNumber} — ${cryptoReceived} ${transaction.coin} converted to ₦${netNgnAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })}`,
+        transaction.id,
+        `INVOICE-${invoice.id}-${transaction.id}`,
+      );
+
+      this.logger.log(
+        `Wallet credited: userId=${invoice.userId} amount=₦${netNgnAmount} invoiceId=${invoice.id}`,
+      );
+    } catch (err) {
+      this.logger.error(
+        `CRITICAL: Failed to credit wallet for userId=${invoice.userId} amount=₦${netNgnAmount}: ${err.message}`,
+      );
+      // In production: push to a dead-letter queue for manual recovery
+    }
+
+    // ── Notify user ────────────────────────────────────────────────────────────
     await this.sendNotification(
       invoice.userId,
       NotificationType.INVOICE_PAID,
       'Payment Received ✅',
-      `Your payment of ${cryptoReceived} ${transaction.coin} for invoice ${invoice.invoiceNumber} has been confirmed. ₦${netNgnAmount.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} will be sent to your bank account shortly.`,
+      `₦${netNgnAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })} has been added to your CryptoPay wallet. You can withdraw to your bank or transfer to another user anytime.`,
       {
         invoiceId: invoice.id,
         transactionId: transaction.id,
@@ -794,15 +794,14 @@ export class NowpaymentsService {
         grossNgnAmount,
         platformFeePercent: feePercent,
         platformFeeNgn,
-        platformFeeUsd,
-        platformFeeCrypto,
         netNgnAmount,
         coin: transaction.coin,
+        walletCredited: true,
       },
     );
 
     this.logger.log(
-      `Payment confirmed: invoice=${invoice.id} crypto=${cryptoReceived} gross_ngn=${grossNgnAmount} fee=${platformFeeNgn} net_ngn=${netNgnAmount}`,
+      `Payment confirmed & wallet credited: invoice=${invoice.id} crypto=${cryptoReceived} net_ngn=₦${netNgnAmount}`,
     );
   }
 

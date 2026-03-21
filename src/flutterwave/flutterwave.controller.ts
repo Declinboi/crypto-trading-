@@ -19,7 +19,6 @@ import { CurrentUser, Public, Roles } from '../auth/decorators/index';
 import { User } from '../entities/user.entity';
 import { UserRole } from '../entities/enums';
 import {
-  InitiatePayoutDto,
   VerifyBankAccountDto,
   FlutterwaveWebhookDto,
   RetryPayoutDto,
@@ -43,17 +42,6 @@ export class FlutterwaveController {
   @HttpCode(HttpStatus.OK)
   verifyBank(@Body() dto: VerifyBankAccountDto) {
     return this.flutterwaveService.verifyBankAccount(dto);
-  }
-
-  // ── POST /api/v1/payouts/initiate ─────────────────────────────────────────────
-  @UseGuards(JwtAuthGuard)
-  @Post('initiate')
-  @HttpCode(HttpStatus.CREATED)
-  initiatePayout(
-    @Body() dto: InitiatePayoutDto,
-    @CurrentUser() user: User,
-  ) {
-    return this.flutterwaveService.initiatePayout(dto, user.id);
   }
 
   // ── POST /api/v1/payouts/retry ────────────────────────────────────────────────
@@ -82,10 +70,7 @@ export class FlutterwaveController {
   // ── GET /api/v1/payouts/:id ───────────────────────────────────────────────────
   @UseGuards(JwtAuthGuard)
   @Get(':id')
-  getPayout(
-    @Param('id', ParseUUIDPipe) id: string,
-    @CurrentUser() user: User,
-  ) {
+  getPayout(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: User) {
     return this.flutterwaveService.getPayout(id, user.id);
   }
 

@@ -134,8 +134,8 @@ export class FlutterwaveService {
     }
   }
 
-  // ── INITIATE PAYOUT ───────────────────────────────────────────────────────────
-  async initiatePayout(
+  // ── INITIATE PAYOUT Admin only───────────────────────────────────────────────────────────
+ private async initiatePayout(
     dto: InitiatePayoutDto,
     userId: string,
   ): Promise<Payout> {
@@ -184,7 +184,9 @@ export class FlutterwaveService {
       );
     }
 
-    const netNgnAmount = Number(transaction.netNgnAmount);
+    const netNgnAmount = Number(
+      transaction.netNgnAmount ?? transaction.ngnAmount,
+    );
     if (!netNgnAmount || netNgnAmount <= 0) {
       throw new BadRequestException(
         'Invalid payout amount. Transaction may not have been fully processed.',
@@ -356,6 +358,126 @@ export class FlutterwaveService {
       );
 
       throw new InternalServerErrorException(`Payout failed: ${err.message}`);
+    }
+  }
+
+  // ── INITIATE DIRECT PAYOUT (from user wallet withdrawal) ─────────────────────
+  async initiateDirectPayout(params: {
+    userId: string;
+    amountNgn: number;
+    bankAccountId: string;
+    narration: string;
+    reference: string;
+  }): Promise<Payout> {
+    const bankAccount = await this.bankAccountRepo.findOne({
+      where: { id: params.bankAccountId, userId: params.userId },
+    });
+
+    if (!bankAccount) throw new NotFoundException('Bank account not found');
+    if (!bankAccount.isVerified) {
+      throw new BadRequestException('Bank account is not verified');
+    }
+
+    // Platform fee + Flutterwave fee
+    const platformFee = await this.getPayoutFeeNgn();
+    const flwFee = await this.getTransferFee(params.amountNgn);
+    const totalFee = platformFee + flwFee;
+    const netAmount = params.amountNgn - totalFee;
+
+    if (netAmount <= 0) {
+      throw new BadRequestException(
+        `Amount too small after fees. Amount: ₦${params.amountNgn}, Fees: ₦${totalFee}`,
+      );
+    }
+
+    const flwReference = `CPAY-WDR-${uuidv4().replace(/-/g, '').substring(0, 12).toUpperCase()}`;
+
+    const payout = await this.payoutRepo.save(
+      this.payoutRepo.create({
+        // No transactionId — this is a direct wallet withdrawal
+        transactionId: null,
+        userId: params.userId,
+        bankAccountId: params.bankAccountId,
+        amountNgn: params.amountNgn,
+        feeNgn: totalFee,
+        netAmountNgn: netAmount,
+        status: PayoutStatus.PROCESSING,
+        flwReference,
+        narration: params.narration,
+        retryCount: 0,
+        metadata: {
+          source: 'wallet_withdrawal',
+          walletReference: params.reference,
+          platformFee,
+          flwFee,
+        } as any,
+      }),
+    );
+
+    // Credit platform fee to system wallet
+    try {
+      await this.creditPayoutFeeToSystemWallet(
+        platformFee,
+        payout.id,
+        null,
+        `wallet-withdrawal-${params.reference}`,
+      );
+    } catch (err) {
+      this.logger.error(`Failed to credit payout fee: ${err.message}`);
+    }
+
+    try {
+      const transfer = await this.executeTransfer({
+        accountNumber: bankAccount.accountNumber,
+        bankCode: bankAccount.bankCode,
+        amount: netAmount,
+        narration: params.narration,
+        reference: flwReference,
+        currency: 'NGN',
+      });
+
+      await this.payoutRepo.update(payout.id, {
+        flwTransferId: String(transfer.id),
+        flwStatus: transfer.status,
+        status:
+          transfer.status === 'SUCCESSFUL'
+            ? PayoutStatus.SUCCESS
+            : PayoutStatus.PROCESSING,
+        ...(transfer.status === 'SUCCESSFUL' && { completedAt: new Date() }),
+      });
+
+      // Deduct from NGN reserve
+      await this.systemWalletService.deductPayoutReserve(
+        params.amountNgn,
+        payout.id,
+        `Wallet withdrawal payout ${payout.id}`,
+      );
+
+      await this.sendNotification(
+        params.userId,
+        NotificationType.PAYOUT_SENT,
+        'Withdrawal Processing 🔄',
+        `₦${netAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })} is being sent to your ${bankAccount.bankName} account ending in ${bankAccount.accountNumber.slice(-4)}.`,
+        {
+          payoutId: payout.id,
+          grossAmount: params.amountNgn,
+          platformFee,
+          flwFee,
+          amountReceived: netAmount,
+        },
+      );
+
+      return (await this.payoutRepo.findOne({
+        where: { id: payout.id },
+      })) as Payout;
+    } catch (err) {
+      await this.payoutRepo.update(payout.id, {
+        status: PayoutStatus.FAILED,
+        failureReason: err.message,
+      });
+      throw new InternalServerErrorException(
+        `Withdrawal payout failed: ${err.message}`,
+      );
     }
   }
 
@@ -1007,7 +1129,7 @@ export class FlutterwaveService {
   private async creditPayoutFeeToSystemWallet(
     feeNgn: number,
     payoutId: string,
-    transactionId: string,
+    transactionId: string | null,
     invoiceRef: string,
   ): Promise<void> {
     // Find the NGN reserve wallet (coin is null for NGN wallets)

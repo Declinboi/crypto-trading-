@@ -117,11 +117,11 @@ export class RecordTransactionDto {
 
   @IsOptional()
   @IsString()
-  transactionId?: string;
+  transactionId?: string | null;
 
   @IsOptional()
   @IsString()
-  payoutId?: string;
+  payoutId?: string | null;
 
   @IsOptional()
   @IsNumber()
