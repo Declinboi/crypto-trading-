@@ -13,6 +13,7 @@ import { FlutterwaveModule } from './flutterwave/flutterwave.module';
       isGlobal: true,
       envFilePath: '.env',
     }),
+
     DatabaseModule,
     AuthModule,
     KycModule,
