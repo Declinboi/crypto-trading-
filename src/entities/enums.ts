@@ -99,16 +99,16 @@ export enum ReferralStatus {
   EXPIRED = 'expired',
 }
 
-export enum SystemWalletStatus {
-  ACTIVE = 'active',
-  INACTIVE = 'inactive',
-  MAINTENANCE = 'maintenance',
+export enum SystemWalletTransactionType {
+  CREDIT = 'credit',           // any NGN coming in (fees, top-ups)
+  DEBIT = 'debit',             // any NGN going out (payouts funded)
+  TOP_UP = 'top_up',           // admin manually deposits NGN
+  FEE_CREDIT = 'fee_credit',   // platform fee credited (% + fixed fees)
+  PAYOUT_RESERVE = 'payout_reserve', // NGN reserved/used for bank payout
+  RECONCILIATION = 'reconciliation', // admin balance correction
 }
 
-export enum SystemWalletTransactionType {
-  DEPOSIT = 'deposit',
-  WITHDRAWAL = 'withdrawal',
-  FEE_CREDIT = 'fee_credit',
-  PAYOUT_RESERVE = 'payout_reserve',
-  RECONCILIATION = 'reconciliation',
+export enum SystemWalletStatus {
+  ACTIVE = 'active',
+  MAINTENANCE = 'maintenance', // no INACTIVE — always active
 }

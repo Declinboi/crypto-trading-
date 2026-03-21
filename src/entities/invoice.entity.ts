@@ -127,6 +127,16 @@ export class Invoice {
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, any> | null;
 
+  @Column({ type: 'boolean', name: 'auto_cashout', default: false })
+  autoCashout: boolean;
+
+  @Column({
+    type: 'uuid',
+    name: 'auto_cashout_bank_account_id',
+    nullable: true,
+  })
+  autoCashoutBankAccountId: string | null;
+
   @DeleteDateColumn({ type: 'timestamptz', name: 'deleted_at' })
   deletedAt: Date | null;
 

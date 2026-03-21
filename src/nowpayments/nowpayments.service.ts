@@ -33,6 +33,7 @@ import {
 } from '../entities/enums';
 import { NowpaymentsWebhookDto } from './dto/nowpayments.dto';
 import { WalletService } from 'src/wallet/wallet.service';
+import { FlutterwaveService } from 'src/flutterwave/flutterwave.service';
 
 // NowPayments coin → our CoinType mapping
 const COIN_MAP: Record<string, CoinType> = {
@@ -72,6 +73,7 @@ export class NowpaymentsService {
   constructor(
     private config: ConfigService,
     private walletService: WalletService,
+    private flutterwaveService: FlutterwaveService,
 
     @InjectRepository(Invoice)
     private invoiceRepo: Repository<Invoice>,
@@ -729,11 +731,9 @@ export class NowpaymentsService {
     if (platformFeeCrypto > 0) {
       try {
         await this.systemWalletService.creditFee(
-          transaction.coin,
-          platformFeeCrypto,
-          platformFeeUsd,
+          platformFeeNgn,
+          `${feePercent}% platform fee for invoice ${invoice.invoiceNumber} — ₦${platformFeeNgn.toFixed(2)}`,
           transaction.id,
-          `${feePercent}% platform fee for invoice ${invoice.invoiceNumber}`,
         );
       } catch (err) {
         this.logger.error(
@@ -742,44 +742,46 @@ export class NowpaymentsService {
       }
     }
 
-    // ── Credit NET NGN directly into user's wallet (already converted, no more FX) ─
-    try {
-      await this.walletService.creditWallet(
+    // ── AUTO-CASHOUT: send directly to bank without user needing to log in ─────
+    if (invoice.autoCashout && invoice.autoCashoutBankAccountId) {
+      await this.handleAutoCashout(invoice, transaction, netNgnAmount);
+    } else {
+      // ── MANUAL: credit NGN to user wallet (user decides when to withdraw) ────
+      try {
+        await this.walletService.creditWallet(
+          invoice.userId,
+          netNgnAmount,
+          `Payment received for invoice ${invoice.invoiceNumber} — ${cryptoReceived} ${transaction.coin} converted to ₦${netNgnAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })}`,
+          transaction.id,
+          `INVOICE-${invoice.id}-${transaction.id}`,
+        );
+
+        this.logger.log(
+          `Wallet credited: userId=${invoice.userId} amount=₦${netNgnAmount}`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `CRITICAL: Failed to credit wallet userId=${invoice.userId} amount=₦${netNgnAmount}: ${err.message}`,
+        );
+      }
+
+      await this.sendNotification(
         invoice.userId,
-        netNgnAmount,
-        `Payment received for invoice ${invoice.invoiceNumber} — ${cryptoReceived} ${transaction.coin} converted to ₦${netNgnAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })}`,
-        transaction.id,
-        `INVOICE-${invoice.id}-${transaction.id}`,
+        NotificationType.INVOICE_PAID,
+        'Payment Received ✅',
+        `₦${netNgnAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })} has been added to your CryptoPay wallet. Withdraw anytime.`,
+        {
+          invoiceId: invoice.id,
+          transactionId: transaction.id,
+          grossNgnAmount,
+          platformFeeNgn,
+          netNgnAmount,
+          cryptoAmount: cryptoReceived,
+          coin: transaction.coin,
+          autoCashout: false,
+        },
       );
-
-      this.logger.log(
-        `Wallet credited: userId=${invoice.userId} amount=₦${netNgnAmount} invoiceId=${invoice.id}`,
-      );
-    } catch (err) {
-      this.logger.error(
-        `CRITICAL: Failed to credit wallet for userId=${invoice.userId} amount=₦${netNgnAmount}: ${err.message}`,
-      );
-      // In production: push to a dead-letter queue for manual recovery
     }
-
-    // ── Notify user ────────────────────────────────────────────────────────────
-    await this.sendNotification(
-      invoice.userId,
-      NotificationType.INVOICE_PAID,
-      'Payment Received ✅',
-      `₦${netNgnAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })} has been added to your CryptoPay wallet. You can withdraw to your bank or transfer to another user anytime.`,
-      {
-        invoiceId: invoice.id,
-        transactionId: transaction.id,
-        grossNgnAmount,
-        platformFeeNgn,
-        platformFeePercent: feePercent,
-        netNgnAmount,
-        cryptoAmount: cryptoReceived,
-        coin: transaction.coin,
-        usdAmount: usdReceived,
-      },
-    );
 
     await this.saveAudit(
       invoice.userId,
@@ -796,13 +798,123 @@ export class NowpaymentsService {
         platformFeeNgn,
         netNgnAmount,
         coin: transaction.coin,
-        walletCredited: true,
+        autoCashout: invoice.autoCashout,
+        walletCredited: !invoice.autoCashout,
       },
     );
 
     this.logger.log(
       `Payment confirmed & wallet credited: invoice=${invoice.id} crypto=${cryptoReceived} net_ngn=₦${netNgnAmount}`,
     );
+  }
+
+  // ── AUTO-CASHOUT: convert and send to bank instantly ─────────────────────────
+  private async handleAutoCashout(
+    invoice: Invoice,
+    transaction: Transaction,
+    netNgnAmount: number,
+  ): Promise<void> {
+    this.logger.log(
+      `Auto-cashout triggered: invoiceId=${invoice.id} amount=₦${netNgnAmount} bankAccountId=${invoice.autoCashoutBankAccountId}`,
+    );
+
+    try {
+      // Notify user that auto-cashout is in progress
+      await this.sendNotification(
+        invoice.userId,
+        NotificationType.INVOICE_PAID,
+        'Payment Received — Auto-cashout in progress 🚀',
+        `₦${netNgnAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })} is being sent directly to your bank account. No action needed.`,
+        {
+          invoiceId: invoice.id,
+          transactionId: transaction.id,
+          netNgnAmount,
+          autoCashout: true,
+        },
+      );
+
+      // Trigger Flutterwave direct payout — no wallet involved
+      const payout = await this.flutterwaveService.initiateDirectPayout({
+        userId: invoice.userId,
+        amountNgn: netNgnAmount,
+        bankAccountId: invoice.autoCashoutBankAccountId!,
+        narration: `Auto-cashout for invoice ${invoice.invoiceNumber}`,
+        reference: `AUTO-${invoice.id}-${transaction.id}`,
+      });
+
+      this.logger.log(
+        `Auto-cashout initiated: payoutId=${payout.id} invoiceId=${invoice.id} amount=₦${netNgnAmount}`,
+      );
+
+      // Deduct NGN reserve immediately
+      await this.systemWalletService.deductPayoutReserve(
+        netNgnAmount,
+        payout.id,
+        `Auto-cashout for invoice ${invoice.invoiceNumber}`,
+      );
+
+      await this.saveAudit(
+        invoice.userId,
+        AuditActorType.WEBHOOK,
+        'payment.auto_cashout',
+        'payouts',
+        payout.id,
+        null,
+        {
+          invoiceId: invoice.id,
+          transactionId: transaction.id,
+          netNgnAmount,
+          bankAccountId: invoice.autoCashoutBankAccountId,
+          payoutId: payout.id,
+        },
+      );
+    } catch (err) {
+      this.logger.error(
+        `Auto-cashout FAILED for invoiceId=${invoice.id}: ${err.message}. Falling back to wallet credit.`,
+      );
+
+      // ── FALLBACK: if auto-cashout fails, credit wallet instead ──────────────
+      // User loses nothing — money goes to wallet and they can withdraw manually
+      try {
+        await this.walletService.creditWallet(
+          invoice.userId,
+          netNgnAmount,
+          `Auto-cashout failed — funds added to wallet instead. Invoice ${invoice.invoiceNumber}`,
+          transaction.id,
+          `AUTO-FALLBACK-${invoice.id}-${transaction.id}`,
+        );
+
+        await this.sendNotification(
+          invoice.userId,
+          NotificationType.PAYOUT_FAILED,
+          'Auto-cashout failed — funds in wallet ⚠️',
+          `We could not send ₦${netNgnAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })} directly to your bank. The funds have been added to your wallet instead. Please withdraw manually.`,
+          {
+            invoiceId: invoice.id,
+            netNgnAmount,
+            error: err.message,
+            fallback: 'wallet',
+          },
+        );
+      } catch (walletErr) {
+        // Last resort — both failed, alert admins
+        this.logger.error(
+          `CRITICAL: Both auto-cashout and wallet fallback failed for invoiceId=${invoice.id}. Manual intervention required. Error: ${walletErr.message}`,
+        );
+
+        await this.sendNotification(
+          invoice.userId,
+          NotificationType.PAYOUT_FAILED,
+          'Payment processing issue ⚠️',
+          `Your payment was received but we had trouble processing it. Our team has been alerted and will resolve this within 24 hours.`,
+          {
+            invoiceId: invoice.id,
+            netNgnAmount,
+            requiresManualIntervention: true,
+          },
+        );
+      }
+    }
   }
 
   private async onPaymentFailed(

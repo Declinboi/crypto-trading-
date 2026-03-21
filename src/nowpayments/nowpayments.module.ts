@@ -12,6 +12,7 @@ import { Notification } from '../entities/notification.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { SystemWalletModule } from '../system-wallet/system-wallet.module';
 import { WalletModule } from 'src/wallet/wallet.module';
+import { FlutterwaveModule } from 'src/flutterwave/flutterwave.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { WalletModule } from 'src/wallet/wallet.module';
     ]),
     SystemWalletModule,
     WalletModule, 
+    FlutterwaveModule, 
   ],
   controllers: [NowpaymentsController],
   providers: [NowpaymentsService],

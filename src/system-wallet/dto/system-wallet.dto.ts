@@ -1,21 +1,20 @@
 import {
   IsString,
   IsNotEmpty,
-  IsEnum,
   IsOptional,
-  IsBoolean,
   IsNumber,
   IsPositive,
   MaxLength,
   Min,
+  IsEnum,
+  IsUUID,
+  IsBoolean,
 } from 'class-validator';
-import { Transform, Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import {
-  CoinType,
-  NetworkType,
   SystemWalletStatus,
   SystemWalletTransactionType,
-} from '../../entities';
+} from '../../entities/enums';
 
 export class CreateSystemWalletDto {
   @IsString()
@@ -25,31 +24,10 @@ export class CreateSystemWalletDto {
   label: string;
 
   @IsOptional()
-  @IsEnum(CoinType)
-  coin?: CoinType;
-
-  @IsOptional()
-  @IsEnum(NetworkType)
-  network?: NetworkType;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(255)
-  address?: string;
-
-  @IsOptional()
-  @IsBoolean()
-  isHotWallet?: boolean;
-
-  @IsOptional()
   @IsNumber()
-  @IsPositive()
-  minBalanceAlertUsd?: number;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(100)
-  nowpaymentsWalletId?: string;
+  @Min(0)
+  @Type(() => Number)
+  minBalanceAlertNgn?: number;
 
   @IsOptional()
   @IsString()
@@ -70,13 +48,9 @@ export class UpdateSystemWalletDto {
 
   @IsOptional()
   @IsNumber()
-  @IsPositive()
-  minBalanceAlertUsd?: number;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(100)
-  nowpaymentsWalletId?: string;
+  @Min(0)
+  @Type(() => Number)
+  minBalanceAlertNgn?: number;
 
   @IsOptional()
   @IsString()
@@ -84,95 +58,96 @@ export class UpdateSystemWalletDto {
   notes?: string;
 }
 
-export class RecordTransactionDto {
-  @IsEnum(SystemWalletTransactionType)
-  type: SystemWalletTransactionType;
-
-  @IsOptional()
-  @IsEnum(CoinType)
-  coin?: CoinType;
-
-  @IsOptional()
+export class TopUpSystemWalletDto {
   @IsNumber()
-  @Min(0)
+  @IsPositive({ message: 'Top-up amount must be greater than 0' })
+  @Min(100, { message: 'Minimum top-up amount is ₦100' })
   @Type(() => Number)
-  amountCrypto?: number;
+  amountNgn: number;
 
-  @IsOptional()
-  @IsNumber()
-  @Min(0)
-  @Type(() => Number)
-  amountUsd?: number;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(0)
-  @Type(() => Number)
-  amountNgn?: number;
-
-  @IsOptional()
   @IsString()
+  @IsNotEmpty()
   @MaxLength(255)
-  txHash?: string;
-
-  @IsOptional()
-  @IsString()
-  transactionId?: string | null;
-
-  @IsOptional()
-  @IsString()
-  payoutId?: string | null;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(0)
-  @Type(() => Number)
-  usdRateSnapshot?: number;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(500)
-  description?: string;
+  description: string;
+  // e.g. "Flutterwave balance top-up", "Bank transfer deposit"
 
   @IsOptional()
   @IsString()
   @MaxLength(100)
   reference?: string;
+  // External bank transfer reference or receipt number
 }
 
-export class SyncBalanceDto {
-  @IsOptional()
+export class WithdrawSystemWalletDto {
   @IsNumber()
-  @Min(0)
+  @IsPositive({ message: 'Withdrawal amount must be greater than 0' })
+  @Min(100, { message: 'Minimum withdrawal amount is ₦100' })
   @Type(() => Number)
-  balanceCrypto?: number;
+  amountNgn: number;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(255)
+  description: string;
+  // e.g. "Profit withdrawal to GTBank 0123456789", "Monthly profit transfer"
 
   @IsOptional()
-  @IsNumber()
-  @Min(0)
-  @Type(() => Number)
-  balanceUsdEquiv?: number;
+  @IsString()
+  @MaxLength(100)
+  reference?: string;
+  // External transfer reference for reconciliation
 
   @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  destinationBank?: string;
+  // For audit trail — where is this money going
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  destinationAccount?: string;
+  // For audit trail
+
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === true || value === 'true')
+  forceWithdraw?: boolean;
+  // Override minimum reserve safety check
+}
+
+export class RecordTransactionDto {
+  @IsEnum(SystemWalletTransactionType)
+  type: SystemWalletTransactionType;
+
   @IsNumber()
   @Min(0)
   @Type(() => Number)
-  balanceNgnReserve?: number;
+  amountNgn: number;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(500)
+  description: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  reference?: string;
+
+  @IsOptional()
+  @IsUUID()
+  relatedPayoutId?: string | null;
+
+  @IsOptional()
+  @IsUUID()
+  relatedTransactionId?: string | null;
 }
 
 export class WalletQueryDto {
   @IsOptional()
-  @IsEnum(CoinType)
-  coin?: CoinType;
-
-  @IsOptional()
   @IsEnum(SystemWalletStatus)
   status?: SystemWalletStatus;
-
-  @IsOptional()
-  @IsBoolean()
-  @Transform(({ value }) => value === 'true')
-  isHotWallet?: boolean;
 
   @IsOptional()
   @Type(() => Number)

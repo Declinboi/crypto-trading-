@@ -7,6 +7,7 @@ import { SystemWalletModule } from './system-wallet/system-wallet.module';
 import { NowpaymentsModule } from './nowpayments/nowpayments.module';
 import { FlutterwaveModule } from './flutterwave/flutterwave.module';
 import { WalletModule } from './wallet/wallet.module';
+import { InvoiceModule } from './invoice/invoice.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { WalletModule } from './wallet/wallet.module';
     NowpaymentsModule,
     FlutterwaveModule,
     WalletModule,
+    InvoiceModule,
   ],
   controllers: [],
   providers: [],

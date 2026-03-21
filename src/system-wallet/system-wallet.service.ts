@@ -3,15 +3,14 @@ import {
   BadRequestException,
   NotFoundException,
   Logger,
-  ConflictException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, IsNull } from 'typeorm';
+import { Repository, DataSource } from 'typeorm';
 import * as crypto from 'crypto';
 
 import { SystemWallet } from '../entities/system-wallet.entity';
 import { SystemWalletTransaction } from '../entities/system-wallet-transaction.entity';
-import { ExchangeRate } from '../entities/exchange-rate.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { Notification } from '../entities/notification.entity';
 import { User } from '../entities/user.entity';
@@ -19,21 +18,21 @@ import {
   SystemWalletStatus,
   SystemWalletTransactionType,
   AuditActorType,
-  CoinType,
   NotificationType,
   NotificationChannel,
 } from '../entities/enums';
 import {
   CreateSystemWalletDto,
   UpdateSystemWalletDto,
+  TopUpSystemWalletDto,
   RecordTransactionDto,
-  SyncBalanceDto,
   WalletQueryDto,
   TransactionQueryDto,
+  WithdrawSystemWalletDto,
 } from './dto/system-wallet.dto';
 
 @Injectable()
-export class SystemWalletService {
+export class SystemWalletService implements OnModuleInit {
   private readonly logger = new Logger(SystemWalletService.name);
 
   constructor(
@@ -42,9 +41,6 @@ export class SystemWalletService {
 
     @InjectRepository(SystemWalletTransaction)
     private txRepo: Repository<SystemWalletTransaction>,
-
-    @InjectRepository(ExchangeRate)
-    private rateRepo: Repository<ExchangeRate>,
 
     @InjectRepository(AuditLog)
     private auditRepo: Repository<AuditLog>,
@@ -58,42 +54,73 @@ export class SystemWalletService {
     private dataSource: DataSource,
   ) {}
 
-  // ── CREATE WALLET ─────────────────────────────────────────────────────────────
-  async create(dto: CreateSystemWalletDto, adminId: string) {
-    // Prevent duplicate address
-    if (dto.address) {
-      const existing = await this.walletRepo.findOne({
-        where: { address: dto.address },
-      });
-      if (existing) {
-        throw new ConflictException('A wallet with this address already exists');
-      }
-    }
+  // ── AUTO-INITIALIZE on server start ──────────────────────────────────────────
+  // Ensures the main system wallet always exists as long as the server runs
+  async onModuleInit() {
+    await this.ensureSystemWalletExists();
+  }
 
-    // Encrypt address before saving
-    const addressEncrypted = dto.address
-      ? this.encryptAddress(dto.address)
-      : null;
-
-    const wallet = this.walletRepo.create({
-      label: dto.label,
-      coin: dto.coin ?? null,
-      network: dto.network ?? null,
-      address: dto.address ?? null,
-      addressEncrypted,
-      isHotWallet: dto.isHotWallet ?? true,
-      minBalanceAlertUsd: dto.minBalanceAlertUsd ?? null,
-      nowpaymentsWalletId: dto.nowpaymentsWalletId ?? null,
-      notes: dto.notes ?? null,
-      status: SystemWalletStatus.ACTIVE,
-      balanceCrypto: 0,
-      balanceUsdEquiv: 0,
-      balanceNgnReserve: 0,
-      totalFeesCollected: 0,
-      totalFeesCollectedUsd: 0,
+  private async ensureSystemWalletExists(): Promise<void> {
+    const existing = await this.walletRepo.findOne({
+      where: { label: 'Main NGN Reserve' },
     });
 
-    await this.walletRepo.save(wallet);
+    if (!existing) {
+      await this.walletRepo.save(
+        this.walletRepo.create({
+          label: 'Main NGN Reserve',
+          balanceNgn: 0,
+          totalCreditedNgn: 0,
+          totalDebitedNgn: 0,
+          totalFeesCollectedNgn: 0,
+          minBalanceAlertNgn: 50000, // alert if below ₦50,000
+          status: SystemWalletStatus.ACTIVE,
+          notes: 'Auto-created main system wallet. Holds all platform NGN.',
+        }),
+      );
+      this.logger.log('Main NGN Reserve system wallet created on startup');
+    } else if (existing.status !== SystemWalletStatus.ACTIVE) {
+      // Always ensure main wallet is active on startup
+      await this.walletRepo.update(existing.id, {
+        status: SystemWalletStatus.ACTIVE,
+      });
+      this.logger.log('Main NGN Reserve system wallet reactivated on startup');
+    } else {
+      this.logger.log(
+        `Main NGN Reserve online — balance: ₦${Number(existing.balanceNgn).toLocaleString('en-NG')}`,
+      );
+    }
+  }
+
+  // ── GET MAIN SYSTEM WALLET ────────────────────────────────────────────────────
+  async getMainWallet(): Promise<SystemWallet> {
+    const wallet = await this.walletRepo.findOne({
+      where: { label: 'Main NGN Reserve' },
+    });
+    if (!wallet) {
+      // Re-create if somehow missing
+      await this.ensureSystemWalletExists();
+      return this.walletRepo.findOne({
+        where: { label: 'Main NGN Reserve' },
+      }) as Promise<SystemWallet>;
+    }
+    return wallet;
+  }
+
+  // ── CREATE ADDITIONAL WALLET (admin) ──────────────────────────────────────────
+  async create(dto: CreateSystemWalletDto, adminId: string) {
+    const wallet = await this.walletRepo.save(
+      this.walletRepo.create({
+        label: dto.label,
+        balanceNgn: 0,
+        totalCreditedNgn: 0,
+        totalDebitedNgn: 0,
+        totalFeesCollectedNgn: 0,
+        minBalanceAlertNgn: dto.minBalanceAlertNgn ?? null,
+        status: SystemWalletStatus.ACTIVE,
+        notes: dto.notes ?? null,
+      }),
+    );
 
     await this.saveAudit(
       adminId,
@@ -102,35 +129,28 @@ export class SystemWalletService {
       'system_wallets',
       wallet.id,
       null,
-      { label: wallet.label, coin: wallet.coin, address: dto.address },
+      { label: wallet.label },
     );
 
     this.logger.log(`System wallet created: ${wallet.label} (${wallet.id})`);
-
-    return {
-      message: 'System wallet created successfully',
-      wallet: this.sanitizeWallet(wallet),
-    };
+    return { message: 'System wallet created successfully', wallet };
   }
 
   // ── GET ALL WALLETS ───────────────────────────────────────────────────────────
   async findAll(query: WalletQueryDto) {
     const qb = this.walletRepo
       .createQueryBuilder('sw')
-      .orderBy('sw.createdAt', 'DESC')
+      .orderBy('sw.createdAt', 'ASC')
       .skip(((query.page ?? 1) - 1) * (query.limit ?? 20))
       .take(query.limit ?? 20);
 
-    if (query.coin) qb.andWhere('sw.coin = :coin', { coin: query.coin });
-    if (query.status) qb.andWhere('sw.status = :status', { status: query.status });
-    if (query.isHotWallet !== undefined) {
-      qb.andWhere('sw.is_hot_wallet = :isHot', { isHot: query.isHotWallet });
+    if (query.status) {
+      qb.andWhere('sw.status = :status', { status: query.status });
     }
 
     const [wallets, total] = await qb.getManyAndCount();
-
     return {
-      data: wallets.map((w) => this.sanitizeWallet(w)),
+      data: wallets,
       total,
       page: query.page ?? 1,
       limit: query.limit ?? 20,
@@ -139,22 +159,10 @@ export class SystemWalletService {
   }
 
   // ── GET SINGLE WALLET ─────────────────────────────────────────────────────────
-  async findOne(walletId: string) {
+  async findOne(walletId: string): Promise<SystemWallet> {
     const wallet = await this.walletRepo.findOne({ where: { id: walletId } });
     if (!wallet) throw new NotFoundException('System wallet not found');
-    return this.sanitizeWallet(wallet);
-  }
-
-  // ── GET WALLET BY COIN ────────────────────────────────────────────────────────
-  async findByCoin(coin: CoinType) {
-    const wallet = await this.walletRepo.findOne({
-      where: { coin, status: SystemWalletStatus.ACTIVE, isHotWallet: true },
-      order: { createdAt: 'DESC' },
-    });
-    if (!wallet) {
-      throw new NotFoundException(`No active hot wallet found for ${coin}`);
-    }
-    return this.sanitizeWallet(wallet);
+    return wallet;
   }
 
   // ── UPDATE WALLET ─────────────────────────────────────────────────────────────
@@ -162,20 +170,27 @@ export class SystemWalletService {
     const wallet = await this.walletRepo.findOne({ where: { id: walletId } });
     if (!wallet) throw new NotFoundException('System wallet not found');
 
+    // Cannot deactivate the main wallet
+    if (
+      wallet.label === 'Main NGN Reserve' &&
+      dto.status === SystemWalletStatus.MAINTENANCE
+    ) {
+      throw new BadRequestException(
+        'The main NGN reserve wallet cannot be put under maintenance while payouts are active',
+      );
+    }
+
     const oldValues = {
       label: wallet.label,
       status: wallet.status,
-      minBalanceAlertUsd: wallet.minBalanceAlertUsd,
+      minBalanceAlertNgn: wallet.minBalanceAlertNgn,
     };
 
     await this.walletRepo.update(walletId, {
       ...(dto.label && { label: dto.label }),
       ...(dto.status && { status: dto.status }),
-      ...(dto.minBalanceAlertUsd !== undefined && {
-        minBalanceAlertUsd: dto.minBalanceAlertUsd,
-      }),
-      ...(dto.nowpaymentsWalletId !== undefined && {
-        nowpaymentsWalletId: dto.nowpaymentsWalletId,
+      ...(dto.minBalanceAlertNgn !== undefined && {
+        minBalanceAlertNgn: dto.minBalanceAlertNgn,
       }),
       ...(dto.notes !== undefined && { notes: dto.notes }),
     });
@@ -190,19 +205,19 @@ export class SystemWalletService {
       dto,
     );
 
-    const updated = await this.walletRepo.findOne({ where: { id: walletId } });
     return {
       message: 'Wallet updated successfully',
-      wallet: this.sanitizeWallet(updated!),
+      wallet: await this.walletRepo.findOne({ where: { id: walletId } }),
     };
   }
 
-  // ── RECORD TRANSACTION ────────────────────────────────────────────────────────
-  // All money movements in/out of system wallets go through here
-  async recordTransaction(
+  // ── ADMIN TOP-UP (deposit NGN into system wallet) ─────────────────────────────
+  // Called when admin manually transfers NGN to fund the reserve
+  // e.g. from Flutterwave balance, direct bank transfer, etc.
+  async adminTopUp(
     walletId: string,
-    dto: RecordTransactionDto,
-    actorId?: string,
+    dto: TopUpSystemWalletDto,
+    adminId: string,
   ) {
     const wallet = await this.walletRepo.findOne({ where: { id: walletId } });
     if (!wallet) throw new NotFoundException('System wallet not found');
@@ -211,115 +226,303 @@ export class SystemWalletService {
       throw new BadRequestException('Wallet is under maintenance');
     }
 
-    // Use DB transaction for atomicity
+    const reference =
+      dto.reference ??
+      `TOPUP-${adminId}-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+
+    // Check reference uniqueness
+    const existing = await this.txRepo.findOne({ where: { reference } });
+    if (existing) {
+      throw new BadRequestException(
+        `Reference ${reference} already exists. Use a unique reference.`,
+      );
+    }
+
+    const result = await this.recordNgnTransaction(
+      walletId,
+      {
+        type: SystemWalletTransactionType.TOP_UP,
+        amountNgn: dto.amountNgn,
+        description: dto.description,
+        reference,
+        relatedPayoutId: null,
+        relatedTransactionId: null,
+      },
+      adminId,
+    );
+
+    await this.saveAudit(
+      adminId,
+      AuditActorType.ADMIN,
+      'system_wallet.top_up',
+      'system_wallets',
+      walletId,
+      null,
+      { amountNgn: dto.amountNgn, reference, description: dto.description },
+    );
+
+    this.logger.log(
+      `System wallet top-up: ₦${dto.amountNgn.toLocaleString('en-NG')} by admin=${adminId} ref=${reference}`,
+    );
+
+    return {
+      message: `₦${dto.amountNgn.toLocaleString('en-NG', { minimumFractionDigits: 2 })} added to system wallet successfully`,
+      newBalance: result.balanceAfter,
+      reference,
+      transaction: result.transaction,
+    };
+  }
+
+  // ── ADMIN WITHDRAW (take profit out of system wallet) ─────────────────────────
+  // Used when admin wants to transfer accumulated fees/profit to their own account
+  async adminWithdraw(
+    walletId: string,
+    dto: WithdrawSystemWalletDto,
+    adminId: string,
+  ) {
+    const wallet = await this.walletRepo.findOne({ where: { id: walletId } });
+    if (!wallet) throw new NotFoundException('System wallet not found');
+
+    if (wallet.status === SystemWalletStatus.MAINTENANCE) {
+      throw new BadRequestException('Wallet is under maintenance');
+    }
+
+    const currentBalance = Number(wallet.balanceNgn);
+
+    if (dto.amountNgn > currentBalance) {
+      throw new BadRequestException(
+        `Insufficient balance. Available: ₦${currentBalance.toLocaleString('en-NG', { minimumFractionDigits: 2 })}, Requested: ₦${dto.amountNgn.toLocaleString('en-NG', { minimumFractionDigits: 2 })}`,
+      );
+    }
+
+    // Safety check — don't allow withdrawing below the minimum reserve threshold
+    const minReserve = Number(wallet.minBalanceAlertNgn ?? 0);
+    const balanceAfterWithdrawal = currentBalance - dto.amountNgn;
+
+    if (
+      minReserve > 0 &&
+      balanceAfterWithdrawal < minReserve &&
+      !dto.forceWithdraw
+    ) {
+      throw new BadRequestException(
+        `Withdrawal of ₦${dto.amountNgn.toLocaleString('en-NG')} would leave balance at ₦${balanceAfterWithdrawal.toLocaleString('en-NG')}, below the minimum reserve of ₦${minReserve.toLocaleString('en-NG')}. Set forceWithdraw=true to override.`,
+      );
+    }
+
+    const reference =
+      dto.reference ??
+      `WITHDRAW-${adminId}-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+
+    const existing = await this.txRepo.findOne({ where: { reference } });
+    if (existing) {
+      throw new BadRequestException(`Reference ${reference} already exists`);
+    }
+
+    const result = await this.recordNgnTransaction(
+      walletId,
+      {
+        type: SystemWalletTransactionType.DEBIT,
+        amountNgn: dto.amountNgn,
+        description: dto.description,
+        reference,
+        relatedPayoutId: null,
+        relatedTransactionId: null,
+      },
+      adminId,
+    );
+
+    await this.saveAudit(
+      adminId,
+      AuditActorType.ADMIN,
+      'system_wallet.admin_withdraw',
+      'system_wallets',
+      walletId,
+      { balanceBefore: result.balanceBefore },
+      {
+        amountNgn: dto.amountNgn,
+        balanceAfter: result.balanceAfter,
+        reference,
+        description: dto.description,
+        destinationBank: dto.destinationBank ?? null,
+        destinationAccount: dto.destinationAccount ?? null,
+      },
+    );
+
+    this.logger.log(
+      `System wallet WITHDRAWAL: ₦${dto.amountNgn.toLocaleString('en-NG')} by admin=${adminId} ref=${reference} balance=${result.balanceBefore}→${result.balanceAfter}`,
+    );
+
+    return {
+      message: `₦${dto.amountNgn.toLocaleString('en-NG', { minimumFractionDigits: 2 })} withdrawn from system wallet successfully`,
+      amountWithdrawn: dto.amountNgn,
+      balanceBefore: result.balanceBefore,
+      balanceAfter: result.balanceAfter,
+      reference,
+      transaction: result.transaction,
+    };
+  }
+
+  // ── CREDIT FEE (called after payment confirmed — NGN only) ────────────────────
+  async creditFee(
+    amountNgn: number,
+    description: string,
+    relatedTransactionId?: string,
+    walletId?: string,
+  ): Promise<void> {
+    // Use provided walletId or fall back to main wallet
+    let targetWalletId = walletId;
+
+    if (!targetWalletId) {
+      const mainWallet = await this.getMainWallet();
+      targetWalletId = mainWallet.id;
+    }
+
+    const reference = `FEE-${relatedTransactionId ?? Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+
+    await this.recordNgnTransaction(targetWalletId, {
+      type: SystemWalletTransactionType.FEE_CREDIT,
+      amountNgn,
+      description,
+      reference,
+      relatedTransactionId: relatedTransactionId ?? null,
+      relatedPayoutId: null,
+    });
+
+    this.logger.log(
+      `Fee credited: ₦${amountNgn.toLocaleString('en-NG')} — ${description}`,
+    );
+  }
+
+  // ── DEDUCT PAYOUT RESERVE (called before NGN payout is sent) ──────────────────
+  async deductPayoutReserve(
+    amountNgn: number,
+    payoutId: string,
+    description: string,
+  ): Promise<void> {
+    const mainWallet = await this.getMainWallet();
+
+    if (Number(mainWallet.balanceNgn) < amountNgn) {
+      this.logger.warn(
+        `Low system wallet balance! Required: ₦${amountNgn}, Available: ₦${mainWallet.balanceNgn}`,
+      );
+      // Non-blocking — payout still proceeds, admin will be alerted
+    }
+
+    const reference = `PAYOUT-RESERVE-${payoutId}-${crypto.randomBytes(3).toString('hex')}`;
+
+    await this.recordNgnTransaction(mainWallet.id, {
+      type: SystemWalletTransactionType.PAYOUT_RESERVE,
+      amountNgn,
+      description,
+      reference,
+      relatedPayoutId: payoutId,
+      relatedTransactionId: null,
+    });
+  }
+
+  // ── CORE: RECORD NGN TRANSACTION ──────────────────────────────────────────────
+  async recordNgnTransaction(
+    walletId: string,
+    dto: RecordTransactionDto,
+    actorId?: string,
+  ): Promise<{
+    transaction: SystemWalletTransaction;
+    balanceBefore: number;
+    balanceAfter: number;
+  }> {
+    const wallet = await this.walletRepo.findOne({ where: { id: walletId } });
+    if (!wallet) throw new NotFoundException('System wallet not found');
+
+    if (wallet.status === SystemWalletStatus.MAINTENANCE) {
+      throw new BadRequestException('System wallet is under maintenance');
+    }
+
     return await this.dataSource.transaction(async (manager) => {
       const walletRepo = manager.getRepository(SystemWallet);
       const txRepo = manager.getRepository(SystemWalletTransaction);
 
-      // Lock the wallet row for update to prevent race conditions
-      const lockedWallet = await walletRepo
+      // Pessimistic lock
+      const locked = await walletRepo
         .createQueryBuilder('sw')
         .setLock('pessimistic_write')
         .where('sw.id = :id', { id: walletId })
         .getOne();
 
-      if (!lockedWallet) throw new NotFoundException('Wallet not found');
+      if (!locked) throw new NotFoundException('Wallet not found');
 
-      const balanceBefore = Number(lockedWallet.balanceCrypto);
-      const amountCrypto = Number(dto.amountCrypto ?? 0);
-      const amountUsd = Number(dto.amountUsd ?? 0);
-      const amountNgn = Number(dto.amountNgn ?? 0);
+      const balanceBefore = Number(locked.balanceNgn);
+      const amountNgn = Number(dto.amountNgn);
 
-      // Calculate new balance based on transaction type
-      let newBalanceCrypto = balanceBefore;
-      let newBalanceNgn = Number(lockedWallet.balanceNgnReserve);
-      let newTotalFees = Number(lockedWallet.totalFeesCollected);
-      let newTotalFeesUsd = Number(lockedWallet.totalFeesCollectedUsd);
+      // Calculate new balance — credits add, debits subtract
+      const isCredit = [
+        SystemWalletTransactionType.FEE_CREDIT,
+        SystemWalletTransactionType.TOP_UP,
+        SystemWalletTransactionType.CREDIT,
+        SystemWalletTransactionType.RECONCILIATION,
+      ].includes(dto.type);
 
-      switch (dto.type) {
-        case SystemWalletTransactionType.DEPOSIT:
-          newBalanceCrypto += amountCrypto;
-          break;
+      const isDebit = [
+        SystemWalletTransactionType.PAYOUT_RESERVE,
+        SystemWalletTransactionType.DEBIT,
+      ].includes(dto.type);
 
-        case SystemWalletTransactionType.WITHDRAWAL:
-          if (amountCrypto > balanceBefore) {
-            throw new BadRequestException(
-              `Insufficient balance. Available: ${balanceBefore}, Requested: ${amountCrypto}`,
-            );
-          }
-          newBalanceCrypto -= amountCrypto;
-          break;
+      let balanceAfter = balanceBefore;
 
-        case SystemWalletTransactionType.FEE_CREDIT:
-          newBalanceCrypto += amountCrypto;
-          newTotalFees += amountCrypto;
-          newTotalFeesUsd += amountUsd;
-          break;
-
-        case SystemWalletTransactionType.PAYOUT_RESERVE:
-          if (amountNgn > newBalanceNgn) {
-            throw new BadRequestException(
-              `Insufficient NGN reserve. Available: ${newBalanceNgn}, Requested: ${amountNgn}`,
-            );
-          }
-          newBalanceNgn -= amountNgn;
-          break;
-
-        case SystemWalletTransactionType.RECONCILIATION:
-          // Reconciliation can set balance to any value
-          newBalanceCrypto = amountCrypto > 0 ? amountCrypto : balanceBefore;
-          if (amountNgn > 0) newBalanceNgn = amountNgn;
-          break;
+      if (isCredit) {
+        balanceAfter = balanceBefore + amountNgn;
+      } else if (isDebit) {
+        // Allow negative balance — system needs to process payouts
+        // Admin will be alerted via low balance alert
+        balanceAfter = balanceBefore - amountNgn;
       }
 
-      // Get current USD equivalent
-      const latestRate = await this.getLatestRate(lockedWallet.coin);
-      const usdEquiv = latestRate
-        ? newBalanceCrypto * latestRate.coinUsdPrice
-        : 0;
+      // Update wallet
+      const updateData: Partial<SystemWallet> = {
+        balanceNgn: balanceAfter,
+        lastTransactionAt: new Date(),
+      };
 
-      // Update wallet balances
-      await walletRepo.update(walletId, {
-        balanceCrypto: newBalanceCrypto,
-        balanceUsdEquiv: usdEquiv,
-        balanceNgnReserve: newBalanceNgn,
-        totalFeesCollected: newTotalFees,
-        totalFeesCollectedUsd: newTotalFeesUsd,
-        lastSyncedAt: new Date(),
-      });
+      if (isCredit) {
+        updateData.totalCreditedNgn =
+          Number(locked.totalCreditedNgn) + amountNgn;
+        if (dto.type === SystemWalletTransactionType.FEE_CREDIT) {
+          updateData.totalFeesCollectedNgn =
+            Number(locked.totalFeesCollectedNgn) + amountNgn;
+        }
+      }
 
-      // Generate idempotency reference
-      const reference =
-        dto.reference ||
-        `SWT-${dto.type.toUpperCase()}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+      if (isDebit) {
+        updateData.totalDebitedNgn = Number(locked.totalDebitedNgn) + amountNgn;
+      }
+
+      await walletRepo.update(walletId, updateData);
 
       // Save ledger entry
+      const reference =
+        dto.reference ??
+        `SWT-${dto.type.toUpperCase()}-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+
       const tx = await txRepo.save(
         txRepo.create({
           systemWalletId: walletId,
           type: dto.type,
-          coin: dto.coin ?? lockedWallet.coin ?? null,
-          amountCrypto,
-          amountUsd,
           amountNgn,
           balanceBefore,
-          balanceAfter: newBalanceCrypto,
-          txHash: dto.txHash ?? null,
-          transactionId: dto.transactionId ?? null,
-          payoutId: dto.payoutId ?? null,
-          usdRateSnapshot: dto.usdRateSnapshot ?? latestRate?.coinUsdPrice ?? null,
-          description: dto.description ?? null,
+          balanceAfter,
           reference,
+          description: dto.description,
+          relatedPayoutId: dto.relatedPayoutId ?? null,
+          relatedTransactionId: dto.relatedTransactionId ?? null,
           metadata: null,
         }),
       );
 
-      // Check low balance alert
+      // Low balance alert
       if (
-        lockedWallet.minBalanceAlertUsd &&
-        usdEquiv < lockedWallet.minBalanceAlertUsd
+        locked.minBalanceAlertNgn &&
+        balanceAfter < Number(locked.minBalanceAlertNgn)
       ) {
-        await this.triggerLowBalanceAlert(lockedWallet, usdEquiv);
+        await this.triggerLowBalanceAlert(locked, balanceAfter);
       }
 
       if (actorId) {
@@ -330,86 +533,16 @@ export class SystemWalletService {
           'system_wallet_transactions',
           tx.id,
           { balanceBefore },
-          { balanceAfter: newBalanceCrypto, amountCrypto, type: dto.type },
+          { balanceAfter, amountNgn, type: dto.type },
         );
       }
 
       this.logger.log(
-        `System wallet ${dto.type}: wallet=${walletId} amount=${amountCrypto} balance=${balanceBefore}→${newBalanceCrypto}`,
+        `System wallet ${dto.type}: ₦${amountNgn.toLocaleString('en-NG')} | balance ₦${balanceBefore.toLocaleString('en-NG')} → ₦${balanceAfter.toLocaleString('en-NG')}`,
       );
 
-      return {
-        message: 'Transaction recorded successfully',
-        transaction: tx,
-        balanceBefore,
-        balanceAfter: newBalanceCrypto,
-      };
+      return { transaction: tx, balanceBefore, balanceAfter };
     });
-  }
-
-  // ── SYNC BALANCE (from external source like NowPayments) ──────────────────────
-  async syncBalance(walletId: string, dto: SyncBalanceDto, adminId: string) {
-    const wallet = await this.walletRepo.findOne({ where: { id: walletId } });
-    if (!wallet) throw new NotFoundException('System wallet not found');
-
-    const oldBalance = {
-      balanceCrypto: wallet.balanceCrypto,
-      balanceUsdEquiv: wallet.balanceUsdEquiv,
-      balanceNgnReserve: wallet.balanceNgnReserve,
-    };
-
-    const updateData: Partial<SystemWallet> = { lastSyncedAt: new Date() };
-
-    if (dto.balanceCrypto !== undefined) {
-      updateData.balanceCrypto = dto.balanceCrypto;
-
-      // Auto-calculate USD equivalent
-      const latestRate = await this.getLatestRate(wallet.coin);
-      if (latestRate) {
-        updateData.balanceUsdEquiv = dto.balanceCrypto * latestRate.coinUsdPrice;
-      }
-
-      // Record reconciliation entry if balance changed
-      const diff = dto.balanceCrypto - Number(wallet.balanceCrypto);
-      if (diff !== 0) {
-        await this.recordTransaction(
-          walletId,
-          {
-            type: SystemWalletTransactionType.RECONCILIATION,
-            amountCrypto: Math.abs(diff),
-            description: `Balance sync reconciliation: ${diff > 0 ? '+' : ''}${diff}`,
-            reference: `SYNC-${Date.now()}`,
-          },
-          adminId,
-        );
-      }
-    }
-
-    if (dto.balanceUsdEquiv !== undefined) {
-      updateData.balanceUsdEquiv = dto.balanceUsdEquiv;
-    }
-
-    if (dto.balanceNgnReserve !== undefined) {
-      updateData.balanceNgnReserve = dto.balanceNgnReserve;
-    }
-
-    await this.walletRepo.update(walletId, updateData);
-
-    await this.saveAudit(
-      adminId,
-      AuditActorType.ADMIN,
-      'system_wallet.balance_synced',
-      'system_wallets',
-      walletId,
-      oldBalance,
-      dto,
-    );
-
-    const updated = await this.walletRepo.findOne({ where: { id: walletId } });
-    return {
-      message: 'Balance synced successfully',
-      wallet: this.sanitizeWallet(updated!),
-    };
   }
 
   // ── GET WALLET TRANSACTIONS ───────────────────────────────────────────────────
@@ -439,44 +572,27 @@ export class SystemWalletService {
     };
   }
 
-  // ── GET PLATFORM STATS ────────────────────────────────────────────────────────
+  // ── PLATFORM STATS ────────────────────────────────────────────────────────────
   async getPlatformStats() {
-    const wallets = await this.walletRepo.find({
-      where: { status: SystemWalletStatus.ACTIVE },
-    });
+    const wallets = await this.walletRepo.find();
 
-    const totalBalanceUsd = wallets.reduce(
-      (sum, w) => sum + Number(w.balanceUsdEquiv),
+    const totalBalanceNgn = wallets.reduce(
+      (s, w) => s + Number(w.balanceNgn),
+      0,
+    );
+    const totalFeesCollectedNgn = wallets.reduce(
+      (s, w) => s + Number(w.totalFeesCollectedNgn),
+      0,
+    );
+    const totalCreditedNgn = wallets.reduce(
+      (s, w) => s + Number(w.totalCreditedNgn),
+      0,
+    );
+    const totalDebitedNgn = wallets.reduce(
+      (s, w) => s + Number(w.totalDebitedNgn),
       0,
     );
 
-    const totalNgnReserve = wallets.reduce(
-      (sum, w) => sum + Number(w.balanceNgnReserve),
-      0,
-    );
-
-    const totalFeesCollectedUsd = wallets.reduce(
-      (sum, w) => sum + Number(w.totalFeesCollectedUsd),
-      0,
-    );
-
-    const byCoins = wallets.reduce(
-      (acc, w) => {
-        if (w.coin) {
-          acc[w.coin] = {
-            balanceCrypto: Number(w.balanceCrypto),
-            balanceUsd: Number(w.balanceUsdEquiv),
-            feesCollected: Number(w.totalFeesCollected),
-            feesUsd: Number(w.totalFeesCollectedUsd),
-            lastSynced: w.lastSyncedAt,
-          };
-        }
-        return acc;
-      },
-      {} as Record<string, any>,
-    );
-
-    // Get transaction summary (last 30 days)
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
@@ -484,137 +600,60 @@ export class SystemWalletService {
       .createQueryBuilder('swt')
       .select('swt.type', 'type')
       .addSelect('COUNT(*)', 'count')
-      .addSelect('SUM(swt.amount_usd)', 'totalUsd')
+      .addSelect('SUM(swt.amount_ngn)', 'totalNgn')
       .where('swt.created_at >= :since', { since: thirtyDaysAgo })
       .groupBy('swt.type')
       .getRawMany();
 
-    return {
-      totalBalanceUsd: totalBalanceUsd.toFixed(2),
-      totalNgnReserve: totalNgnReserve.toFixed(2),
-      totalFeesCollectedUsd: totalFeesCollectedUsd.toFixed(2),
-      walletCount: wallets.length,
-      byCoins,
-      last30DaysTxSummary: txSummary,
-    };
-  }
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
 
-  // ── CREDIT FEE (called after a user transaction is confirmed) ─────────────────
-  async creditFee(
-    coin: CoinType,
-    feeCrypto: number,
-    feeUsd: number,
-    userTransactionId: string,
-    description: string,
-  ) {
-    const wallet = await this.walletRepo.findOne({
-      where: { coin, status: SystemWalletStatus.ACTIVE, isHotWallet: true },
-    });
-
-    if (!wallet) {
-      this.logger.warn(
-        `No active hot wallet found for coin ${coin} to credit fee`,
-      );
-      return;
-    }
-
-    await this.recordTransaction(
-      wallet.id,
-      {
+    const todayFees = await this.txRepo
+      .createQueryBuilder('swt')
+      .select('SUM(swt.amount_ngn)', 'totalNgn')
+      .addSelect('COUNT(*)', 'count')
+      .where('swt.created_at >= :today', { today: todayStart })
+      .andWhere('swt.type = :type', {
         type: SystemWalletTransactionType.FEE_CREDIT,
-        coin,
-        amountCrypto: feeCrypto,
-        amountUsd: feeUsd,
-        transactionId: userTransactionId,
-        description,
-        reference: `FEE-${userTransactionId}`,
-      },
-    );
-
-    this.logger.log(
-      `Fee credited: ${feeCrypto} ${coin} ($${feeUsd}) for tx ${userTransactionId}`,
-    );
-  }
-
-  // ── DEDUCT PAYOUT RESERVE (called before NGN payout is sent) ──────────────────
-  async deductPayoutReserve(
-    amountNgn: number,
-    payoutId: string,
-    description: string,
-  ) {
-    // Find NGN reserve wallet
-    const wallet = await this.walletRepo.findOne({
-      where: {
-        status: SystemWalletStatus.ACTIVE,
-        isHotWallet: true,
-        coin: IsNull(),
-      },
-      order: { balanceNgnReserve: 'DESC' },
-    });
-
-    if (!wallet) {
-      this.logger.warn('No NGN reserve wallet found');
-      return;
-    }
-
-    await this.recordTransaction(
-      wallet.id,
-      {
-        type: SystemWalletTransactionType.PAYOUT_RESERVE,
-        amountNgn,
-        payoutId,
-        description,
-        reference: `PAYOUT-RESERVE-${payoutId}`,
-      },
-    );
-  }
-
-  // ── TOGGLE WALLET STATUS ──────────────────────────────────────────────────────
-  async toggleStatus(
-    walletId: string,
-    status: SystemWalletStatus,
-    adminId: string,
-  ) {
-    const wallet = await this.walletRepo.findOne({ where: { id: walletId } });
-    if (!wallet) throw new NotFoundException('System wallet not found');
-
-    await this.walletRepo.update(walletId, { status });
-
-    await this.saveAudit(
-      adminId,
-      AuditActorType.ADMIN,
-      'system_wallet.status_changed',
-      'system_wallets',
-      walletId,
-      { status: wallet.status },
-      { status },
-    );
+      })
+      .getRawOne();
 
     return {
-      message: `Wallet status changed to ${status}`,
-      walletId,
-      status,
+      wallets: wallets.map((w) => ({
+        id: w.id,
+        label: w.label,
+        balanceNgn: Number(w.balanceNgn),
+        totalFeesCollectedNgn: Number(w.totalFeesCollectedNgn),
+        totalCreditedNgn: Number(w.totalCreditedNgn),
+        totalDebitedNgn: Number(w.totalDebitedNgn),
+        minBalanceAlertNgn: w.minBalanceAlertNgn,
+        status: w.status,
+        lastTransactionAt: w.lastTransactionAt,
+      })),
+      totals: {
+        balanceNgn: totalBalanceNgn.toFixed(2),
+        feesCollectedNgn: totalFeesCollectedNgn.toFixed(2),
+        creditedNgn: totalCreditedNgn.toFixed(2),
+        debitedNgn: totalDebitedNgn.toFixed(2),
+        netNgn: (totalCreditedNgn - totalDebitedNgn).toFixed(2),
+      },
+      today: {
+        feesNgn: Number(todayFees?.totalNgn ?? 0).toFixed(2),
+        feeCount: Number(todayFees?.count ?? 0),
+      },
+      last30Days: txSummary,
     };
   }
 
   // ── PRIVATE HELPERS ───────────────────────────────────────────────────────────
-  private async getLatestRate(coin: CoinType | null) {
-    if (!coin) return null;
-    return this.rateRepo.findOne({
-      where: { coin },
-      order: { fetchedAt: 'DESC' },
-    });
-  }
-
   private async triggerLowBalanceAlert(
     wallet: SystemWallet,
-    currentUsdEquiv: number,
-  ) {
+    currentBalance: number,
+  ): Promise<void> {
     this.logger.warn(
-      `LOW BALANCE ALERT: wallet=${wallet.label} current=$${currentUsdEquiv} threshold=$${wallet.minBalanceAlertUsd}`,
+      `LOW BALANCE ALERT: wallet="${wallet.label}" current=₦${currentBalance.toLocaleString('en-NG')} threshold=₦${wallet.minBalanceAlertNgn?.toLocaleString('en-NG')}`,
     );
 
-    // Get all admins and notify
     const admins = await this.userRepo.find({
       where: [{ role: 'admin' as any }, { role: 'super_admin' as any }],
     });
@@ -626,57 +665,15 @@ export class SystemWalletService {
           type: NotificationType.PAYOUT_FAILED,
           channel: NotificationChannel.IN_APP,
           title: '⚠️ Low System Wallet Balance',
-          body: `Wallet "${wallet.label}" (${wallet.coin ?? 'NGN'}) balance is $${currentUsdEquiv.toFixed(2)}, below threshold of $${wallet.minBalanceAlertUsd}. Please top up.`,
+          body: `System wallet "${wallet.label}" balance is ₦${currentBalance.toLocaleString('en-NG', { minimumFractionDigits: 2 })}, below alert threshold of ₦${Number(wallet.minBalanceAlertNgn).toLocaleString('en-NG')}. Please top up immediately to avoid failed payouts.`,
           data: {
             walletId: wallet.id,
-            coin: wallet.coin,
-            currentUsdEquiv,
-            threshold: wallet.minBalanceAlertUsd,
+            currentBalanceNgn: currentBalance,
+            thresholdNgn: wallet.minBalanceAlertNgn,
           },
         }),
       );
     }
-  }
-
-  private encryptAddress(address: string): string {
-    const key = crypto.scryptSync(
-      process.env.FIELD_ENCRYPTION_KEY || 'default-key',
-      'salt',
-      32,
-    );
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
-    const encrypted = Buffer.concat([
-      cipher.update(address, 'utf8'),
-      cipher.final(),
-    ]);
-    return iv.toString('hex') + ':' + encrypted.toString('hex');
-  }
-
-  private decryptAddress(encrypted: string): string {
-    try {
-      const [ivHex, encryptedHex] = encrypted.split(':');
-      const key = crypto.scryptSync(
-        process.env.FIELD_ENCRYPTION_KEY || 'default-key',
-        'salt',
-        32,
-      );
-      const iv = Buffer.from(ivHex, 'hex');
-      const encryptedText = Buffer.from(encryptedHex, 'hex');
-      const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-      const decrypted = Buffer.concat([
-        decipher.update(encryptedText),
-        decipher.final(),
-      ]);
-      return decrypted.toString('utf8');
-    } catch {
-      return '';
-    }
-  }
-
-  private sanitizeWallet(wallet: SystemWallet) {
-    const { addressEncrypted, ...safe } = wallet as any;
-    return safe;
   }
 
   private async saveAudit(
@@ -687,7 +684,6 @@ export class SystemWalletService {
     entityId?: string,
     oldValues?: any,
     newValues?: any,
-    ipAddress?: string,
   ) {
     await this.auditRepo.save(
       this.auditRepo.create({
@@ -698,7 +694,6 @@ export class SystemWalletService {
         entityId,
         oldValues: oldValues ?? null,
         newValues: newValues ?? null,
-        ipAddress: ipAddress ?? null,
       }),
     );
   }

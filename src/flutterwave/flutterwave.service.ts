@@ -29,6 +29,7 @@ import {
   AuditActorType,
   NotificationType,
   NotificationChannel,
+  SystemWalletTransactionType,
 } from '../entities/enums';
 import {
   InitiatePayoutDto,
@@ -135,7 +136,7 @@ export class FlutterwaveService {
   }
 
   // ── INITIATE PAYOUT Admin only───────────────────────────────────────────────────────────
- private async initiatePayout(
+  private async initiatePayout(
     dto: InitiatePayoutDto,
     userId: string,
   ): Promise<Payout> {
@@ -1132,42 +1133,18 @@ export class FlutterwaveService {
     transactionId: string | null,
     invoiceRef: string,
   ): Promise<void> {
-    // Find the NGN reserve wallet (coin is null for NGN wallets)
-    const { IsNull } = await import('typeorm');
+    const mainWallet = await this.systemWalletService.getMainWallet();
 
-    const ngnWallet = await this.dataSource
-      .getRepository('system_wallets')
-      .findOne({
-        where: {
-          status: 'active',
-          isHotWallet: true,
-          coin: IsNull(),
-        },
-        order: { createdAt: 'ASC' },
-      });
-
-    if (!ngnWallet) {
-      this.logger.warn(
-        `No NGN reserve wallet found to credit payout fee of ₦${feeNgn}`,
-      );
-      return;
-    }
-
-    // Record as a FEE_CREDIT entry on the NGN reserve wallet
-    await this.systemWalletService.recordTransaction(ngnWallet.id, {
-      type: 'fee_credit' as any,
+    await this.systemWalletService.recordNgnTransaction(mainWallet.id, {
+      type: SystemWalletTransactionType.FEE_CREDIT,
       amountNgn: feeNgn,
-      amountUsd: 0,
-      amountCrypto: 0,
-      payoutId,
-      transactionId,
-      description: `Fixed payout fee ₦${feeNgn} — invoice ${invoiceRef}`,
-      reference: `PAYOUT-FEE-${payoutId}`,
+      description: `Fixed payout fee ₦${feeNgn} — ${invoiceRef}`,
+      reference: `PAYOUT-FEE-${payoutId}-${Date.now()}`,
+      relatedPayoutId: payoutId,
+      relatedTransactionId: transactionId,
     });
 
-    this.logger.log(
-      `Payout fee credited to system wallet: ₦${feeNgn} for payout ${payoutId}`,
-    );
+    this.logger.log(`Payout fee credited: ₦${feeNgn} for payout ${payoutId}`);
   }
 
   private async getPayoutFeeNgn(): Promise<number> {

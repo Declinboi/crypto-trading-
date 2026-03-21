@@ -15,14 +15,14 @@ import { SystemWalletService } from './system-wallet.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser, Roles } from '../auth/decorators/index';
 import { User } from '../entities/user.entity';
-import { UserRole, CoinType, SystemWalletStatus } from '../entities/enums';
+import { UserRole } from '../entities/enums';
 import {
   CreateSystemWalletDto,
   UpdateSystemWalletDto,
-  RecordTransactionDto,
-  SyncBalanceDto,
+  TopUpSystemWalletDto,
   WalletQueryDto,
   TransactionQueryDto,
+  WithdrawSystemWalletDto,
 } from './dto/system-wallet.dto';
 
 @Controller('api/v1/system-wallets')
@@ -37,6 +37,12 @@ export class SystemWalletController {
     return this.systemWalletService.getPlatformStats();
   }
 
+  // ── GET /api/v1/system-wallets/main ──────────────────────────────────────────
+  @Get('main')
+  getMainWallet() {
+    return this.systemWalletService.getMainWallet();
+  }
+
   // ── GET /api/v1/system-wallets ────────────────────────────────────────────────
   @Get()
   findAll(@Query() query: WalletQueryDto) {
@@ -48,12 +54,6 @@ export class SystemWalletController {
   @HttpCode(HttpStatus.CREATED)
   create(@Body() dto: CreateSystemWalletDto, @CurrentUser() user: User) {
     return this.systemWalletService.create(dto, user.id);
-  }
-
-  // ── GET /api/v1/system-wallets/coin/:coin ─────────────────────────────────────
-  @Get('coin/:coin')
-  findByCoin(@Param('coin') coin: CoinType) {
-    return this.systemWalletService.findByCoin(coin);
   }
 
   // ── GET /api/v1/system-wallets/:id ───────────────────────────────────────────
@@ -73,37 +73,28 @@ export class SystemWalletController {
     return this.systemWalletService.update(id, dto, user.id);
   }
 
-  // ── PATCH /api/v1/system-wallets/:id/status ───────────────────────────────────
-  @Patch(':id/status')
+  // ── POST /api/v1/system-wallets/:id/top-up ───────────────────────────────────
+  // Admin manually tops up the NGN reserve
+  @Post(':id/top-up')
   @HttpCode(HttpStatus.OK)
-  toggleStatus(
+  topUp(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body('status') status: SystemWalletStatus,
+    @Body() dto: TopUpSystemWalletDto,
     @CurrentUser() user: User,
   ) {
-    return this.systemWalletService.toggleStatus(id, status, user.id);
+    return this.systemWalletService.adminTopUp(id, dto, user.id);
   }
 
-  // ── PATCH /api/v1/system-wallets/:id/sync-balance ────────────────────────────
-  @Patch(':id/sync-balance')
+  // ── POST /api/v1/system-wallets/:id/withdraw ──────────────────────────────────
+  // Admin withdraws profit/fees from the system wallet
+  @Post(':id/withdraw')
   @HttpCode(HttpStatus.OK)
-  syncBalance(
+  withdraw(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: SyncBalanceDto,
+    @Body() dto: WithdrawSystemWalletDto,
     @CurrentUser() user: User,
   ) {
-    return this.systemWalletService.syncBalance(id, dto, user.id);
-  }
-
-  // ── POST /api/v1/system-wallets/:id/transactions ─────────────────────────────
-  @Post(':id/transactions')
-  @HttpCode(HttpStatus.CREATED)
-  recordTransaction(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: RecordTransactionDto,
-    @CurrentUser() user: User,
-  ) {
-    return this.systemWalletService.recordTransaction(id, dto, user.id);
+    return this.systemWalletService.adminWithdraw(id, dto, user.id);
   }
 
   // ── GET /api/v1/system-wallets/:id/transactions ───────────────────────────────
