@@ -12,7 +12,7 @@ import { Notification } from '../entities/notification.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { SystemWalletModule } from '../system-wallet/system-wallet.module';
 import { WalletModule } from 'src/wallet/wallet.module';
-import { FlutterwaveModule } from 'src/flutterwave/flutterwave.module';
+import { MonnifyModule } from 'src/monnify/monnify.module';
 
 @Module({
   imports: [
@@ -27,8 +27,8 @@ import { FlutterwaveModule } from 'src/flutterwave/flutterwave.module';
       AuditLog,
     ]),
     SystemWalletModule,
-    WalletModule, 
-    FlutterwaveModule, 
+    WalletModule,
+    MonnifyModule,
   ],
   controllers: [NowpaymentsController],
   providers: [NowpaymentsService],

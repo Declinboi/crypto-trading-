@@ -20,7 +20,7 @@ import { BankAccount } from '../entities/bank-account.entity';
 import { Transaction } from '../entities/transaction.entity';
 import { Notification } from '../entities/notification.entity';
 import { AuditLog } from '../entities/audit-log.entity';
-import { FlutterwaveService } from '../flutterwave/flutterwave.service';
+import { MonnifyService } from '../monnify/monnify.service';
 import {
   AuditActorType,
   NotificationType,
@@ -66,7 +66,7 @@ export class WalletService {
     @InjectRepository(AuditLog)
     private auditRepo: Repository<AuditLog>,
 
-    private flutterwaveService: FlutterwaveService,
+    private monnifyService: MonnifyService,
     private dataSource: DataSource,
   ) {}
 
@@ -579,7 +579,7 @@ export class WalletService {
     // ── Trigger Flutterwave payout directly ──────────────────────────────────────
     // No synthetic transaction needed — wallet NGN is already converted and final
     try {
-      const payout = await this.flutterwaveService.initiateDirectPayout({
+      const payout = await this.monnifyService.initiateDirectPayout({
         userId,
         amountNgn: dto.amount,
         bankAccountId: dto.bankAccountId,

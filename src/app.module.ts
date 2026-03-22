@@ -5,9 +5,10 @@ import { AuthModule } from './auth/auth.module';
 import { KycModule } from './kyc/kyc.module';
 import { SystemWalletModule } from './system-wallet/system-wallet.module';
 import { NowpaymentsModule } from './nowpayments/nowpayments.module';
-import { FlutterwaveModule } from './flutterwave/flutterwave.module';
+
 import { WalletModule } from './wallet/wallet.module';
 import { InvoiceModule } from './invoice/invoice.module';
+import { MonnifyModule } from './monnify/monnify.module';
 
 @Module({
   imports: [
@@ -21,7 +22,7 @@ import { InvoiceModule } from './invoice/invoice.module';
     KycModule,
     SystemWalletModule,
     NowpaymentsModule,
-    FlutterwaveModule,
+    MonnifyModule,
     WalletModule,
     InvoiceModule,
   ],

@@ -33,7 +33,7 @@ import {
 } from '../entities/enums';
 import { NowpaymentsWebhookDto } from './dto/nowpayments.dto';
 import { WalletService } from 'src/wallet/wallet.service';
-import { FlutterwaveService } from 'src/flutterwave/flutterwave.service';
+import { MonnifyService } from '../monnify/monnify.service';
 
 // NowPayments coin → our CoinType mapping
 const COIN_MAP: Record<string, CoinType> = {
@@ -73,7 +73,7 @@ export class NowpaymentsService {
   constructor(
     private config: ConfigService,
     private walletService: WalletService,
-    private flutterwaveService: FlutterwaveService,
+    private monnifyService: MonnifyService,
 
     @InjectRepository(Invoice)
     private invoiceRepo: Repository<Invoice>,
@@ -159,7 +159,7 @@ export class NowpaymentsService {
 
         if (coinUsdPrice === 0) continue;
 
-        // Get USD/NGN rate (use Flutterwave or a separate feed in production)
+        // Get USD/NGN rate from provider
         const usdNgnRate = await this.getUsdNgnRate();
 
         const spreadPercent = Number(
@@ -833,8 +833,8 @@ export class NowpaymentsService {
         },
       );
 
-      // Trigger Flutterwave direct payout — no wallet involved
-      const payout = await this.flutterwaveService.initiateDirectPayout({
+      // Trigger Monnify direct payout — no wallet involved
+      const payout = await this.monnifyService.initiateDirectPayout({
         userId: invoice.userId,
         amountNgn: netNgnAmount,
         bankAccountId: invoice.autoCashoutBankAccountId!,
