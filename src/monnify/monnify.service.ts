@@ -625,7 +625,7 @@ export class MonnifyService implements OnModuleInit {
 
     const webhookEvent = await this.webhookRepo.save(
       this.webhookRepo.create({
-        source: WebhookSource.FLUTTERWAVE, // reuse field
+        source: WebhookSource.MONNIFY, 
         eventType: dto.eventType,
         externalRef: dto.eventData?.transactionReference,
         payload: JSON.parse(rawPayload),

@@ -30,6 +30,8 @@ export enum CoinType {
   SOL = 'sol',
   USDT_TRC20 = 'usdt_trc20',
   USDT_ERC20 = 'usdt_erc20',
+  LTC = 'ltc', // ← add
+  TRX = 'trx',
 }
 
 export enum NetworkType {
@@ -37,6 +39,7 @@ export enum NetworkType {
   ETHEREUM = 'ethereum',
   SOLANA = 'solana',
   TRON = 'tron',
+  LITECOIN = 'litecoin',
 }
 
 export enum TransactionStatus {
@@ -46,6 +49,7 @@ export enum TransactionStatus {
   FAILED = 'failed',
   EXPIRED = 'expired',
   REFUNDED = 'refunded',
+  BLOCKED    = 'blocked', 
 }
 
 export enum PayoutStatus {
@@ -76,7 +80,7 @@ export enum NotificationChannel {
 
 export enum WebhookSource {
   NOWPAYMENTS = 'nowpayments',
-  FLUTTERWAVE = 'flutterwave',
+  MONNIFY = 'monnify',
 }
 
 export enum AuditActorType {
@@ -100,10 +104,10 @@ export enum ReferralStatus {
 }
 
 export enum SystemWalletTransactionType {
-  CREDIT = 'credit',           // any NGN coming in (fees, top-ups)
-  DEBIT = 'debit',             // any NGN going out (payouts funded)
-  TOP_UP = 'top_up',           // admin manually deposits NGN
-  FEE_CREDIT = 'fee_credit',   // platform fee credited (% + fixed fees)
+  CREDIT = 'credit', // any NGN coming in (fees, top-ups)
+  DEBIT = 'debit', // any NGN going out (payouts funded)
+  TOP_UP = 'top_up', // admin manually deposits NGN
+  FEE_CREDIT = 'fee_credit', // platform fee credited (% + fixed fees)
   PAYOUT_RESERVE = 'payout_reserve', // NGN reserved/used for bank payout
   RECONCILIATION = 'reconciliation', // admin balance correction
 }

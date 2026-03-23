@@ -13,6 +13,7 @@ import { AuditLog } from '../entities/audit-log.entity';
 import { SystemWalletModule } from '../system-wallet/system-wallet.module';
 import { WalletModule } from 'src/wallet/wallet.module';
 import { MonnifyModule } from 'src/monnify/monnify.module';
+import { QuidaxModule } from 'src/quidax/quidax.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { MonnifyModule } from 'src/monnify/monnify.module';
     SystemWalletModule,
     WalletModule,
     MonnifyModule,
+    QuidaxModule, 
   ],
   controllers: [NowpaymentsController],
   providers: [NowpaymentsService],

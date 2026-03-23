@@ -34,6 +34,7 @@ import {
 import { NowpaymentsWebhookDto } from './dto/nowpayments.dto';
 import { WalletService } from 'src/wallet/wallet.service';
 import { MonnifyService } from '../monnify/monnify.service';
+import { QuidaxService } from 'src/quidax/quidax.service';
 
 // NowPayments coin → our CoinType mapping
 const COIN_MAP: Record<string, CoinType> = {
@@ -42,6 +43,8 @@ const COIN_MAP: Record<string, CoinType> = {
   btc: CoinType.BTC,
   eth: CoinType.ETH,
   sol: CoinType.SOL,
+  ltc: CoinType.LTC, // ← add
+  trx: CoinType.TRX,
 };
 
 // CoinType → NowPayments currency string
@@ -51,6 +54,8 @@ const COIN_TO_NP: Record<CoinType, string> = {
   [CoinType.BTC]: 'btc',
   [CoinType.ETH]: 'eth',
   [CoinType.SOL]: 'sol',
+  [CoinType.LTC]: 'ltc',
+  [CoinType.TRX]: 'trx',
 };
 
 // CoinType → NetworkType
@@ -60,6 +65,8 @@ const COIN_NETWORK_MAP: Record<CoinType, NetworkType> = {
   [CoinType.BTC]: NetworkType.BITCOIN,
   [CoinType.ETH]: NetworkType.ETHEREUM,
   [CoinType.SOL]: NetworkType.SOLANA,
+  [CoinType.LTC]: NetworkType.LITECOIN,
+  [CoinType.TRX]: NetworkType.TRON,
 };
 
 @Injectable()
@@ -100,6 +107,9 @@ export class NowpaymentsService {
     private auditRepo: Repository<AuditLog>,
 
     private systemWalletService: SystemWalletService,
+
+    private quidaxService: QuidaxService,
+
     private dataSource: DataSource,
   ) {
     this.apiKey = config.get<string>('NOWPAYMENTS_API_KEY') as string;
@@ -671,6 +681,67 @@ export class NowpaymentsService {
       return;
     }
 
+    // ── QUIDAX VERIFICATION — runs before any money moves ─────────────────────
+    // Only verify if we have a tx hash — some coins confirm without one initially
+    if (dto.payin_hash) {
+      const coin =
+        COIN_MAP[dto.pay_currency?.toLowerCase()] ?? CoinType.USDT_TRC20;
+      const cryptoReceived = Number(dto.actually_paid ?? dto.pay_amount);
+
+      const verification = await this.quidaxService.runFullVerification(
+        dto.payin_hash,
+        coin,
+        cryptoReceived,
+        dto.payment_id,
+      );
+
+      if (!verification.passed) {
+        this.logger.error(
+          `Payment BLOCKED — Quidax verification failed: ` +
+            `paymentId=${dto.payment_id} txHash=${dto.payin_hash} ` +
+            `reason="${verification.result.reason}" ` +
+            `isFlash=${verification.result.isFlash}`,
+        );
+
+        // Mark transaction as suspicious — do not credit wallet
+        await this.txRepo.update(transaction.id, {
+          status: TransactionStatus.FAILED,
+          metadata: {
+            ...(transaction.metadata as any),
+            blocked: true,
+            blockReason: verification.result.reason,
+            isFlashDeposit: verification.result.isFlash,
+            verificationData: verification,
+          },
+        });
+
+        // Notify user payment is under review — don't reveal flash detection
+        await this.sendNotification(
+          invoice.userId,
+          NotificationType.PAYOUT_FAILED,
+          'Payment Under Review ⏳',
+          `Your payment for invoice ${invoice.invoiceNumber} is being verified. ` +
+            `This usually takes a few minutes. You will be notified once confirmed.`,
+          { invoiceId: invoice.id, transactionId: transaction.id },
+        );
+
+        return; // ← STOP HERE — nothing gets credited
+      }
+
+      this.logger.log(
+        `Quidax verification PASSED for paymentId=${dto.payment_id} ` +
+          `confirmations=${verification.result.confirmations}`,
+      );
+    } else {
+      // No tx hash yet — NowPayments sometimes sends confirmed before hash is available
+      // Log it but continue — NowPayments themselves have verified it
+      this.logger.warn(
+        `No tx hash in webhook for paymentId=${dto.payment_id} — ` +
+          `proceeding with NowPayments verification only`,
+      );
+    }
+
+    // ── Continue with normal payment processing ────────────────────────────────
     const rate = await this.rateRepo.findOne({
       where: { coin: transaction.coin },
       order: { fetchedAt: 'DESC' },
@@ -1036,6 +1107,8 @@ export class NowpaymentsService {
       [CoinType.SOL]: 1,
       [CoinType.USDT_TRC20]: 20,
       [CoinType.USDT_ERC20]: 12,
+      [CoinType.LTC]: 6, // ← add: Litecoin needs 6 confirmations
+      [CoinType.TRX]: 20,
     };
     return map[coin] ?? 1;
   }
