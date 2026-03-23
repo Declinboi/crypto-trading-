@@ -14,6 +14,8 @@ import { SystemWalletModule } from '../system-wallet/system-wallet.module';
 import { WalletModule } from 'src/wallet/wallet.module';
 import { MonnifyModule } from 'src/monnify/monnify.module';
 import { QuidaxModule } from 'src/quidax/quidax.module';
+import { QUEUE_PAYMENT } from 'src/queue/queue.constants';
+import { BullModule } from '@nestjs/bull';
 
 @Module({
   imports: [
@@ -27,10 +29,12 @@ import { QuidaxModule } from 'src/quidax/quidax.module';
       Notification,
       AuditLog,
     ]),
+
+    BullModule.registerQueue({ name: QUEUE_PAYMENT }),
     SystemWalletModule,
     WalletModule,
     MonnifyModule,
-    QuidaxModule, 
+    QuidaxModule,
   ],
   controllers: [NowpaymentsController],
   providers: [NowpaymentsService],

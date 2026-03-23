@@ -536,8 +536,7 @@ export class MonnifyService implements OnModuleInit {
           accountName: 'CryptoPay NG System Reserve',
           currencyCode: 'NGN',
           contractCode: this.contractCode,
-          customerEmail:
-            this.config.get('ADMIN_EMAIL') ?? 'admin@cryptopayng.com',
+          customerEmail: this.config.get('ADMIN_EMAIL'),
           customerName: 'CryptoPay NG Admin',
           getAllAvailableBanks: false,
           preferredBanks: ['035'], // Wema Bank (ALAT) — change as needed
@@ -625,7 +624,7 @@ export class MonnifyService implements OnModuleInit {
 
     const webhookEvent = await this.webhookRepo.save(
       this.webhookRepo.create({
-        source: WebhookSource.MONNIFY, 
+        source: WebhookSource.MONNIFY,
         eventType: dto.eventType,
         externalRef: dto.eventData?.transactionReference,
         payload: JSON.parse(rawPayload),

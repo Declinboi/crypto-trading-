@@ -1,0 +1,20 @@
+// ── Queue names ───────────────────────────────────────────────────────────────
+export const QUEUE_PAYMENT        = 'payment';
+export const QUEUE_PAYOUT         = 'payout';
+export const QUEUE_RATE_FETCH     = 'rate-fetch';
+export const QUEUE_NOTIFICATION   = 'notification';
+export const QUEUE_VERIFICATION   = 'verification';
+export const QUEUE_INVOICE_EXPIRE = 'invoice-expire';
+
+// ── Job names ─────────────────────────────────────────────────────────────────
+export const JOB_PROCESS_PAYMENT         = 'process-payment';
+export const JOB_INITIATE_PAYOUT         = 'initiate-payout';
+export const JOB_RETRY_PAYOUT            = 'retry-payout';
+export const JOB_FETCH_RATES             = 'fetch-rates';
+export const JOB_SEND_EMAIL              = 'send-email';
+export const JOB_SEND_IN_APP             = 'send-in-app';
+export const JOB_VERIFY_DEPOSIT          = 'verify-deposit';
+export const JOB_EXPIRE_RATE_LOCKS       = 'expire-rate-locks';
+export const JOB_EXPIRE_INVOICES         = 'expire-invoices';
+export const JOB_RETRY_FAILED_PAYOUTS    = 'retry-failed-payouts';
+export const JOB_SYNC_MONNIFY_BALANCE    = 'sync-monnify-balance';

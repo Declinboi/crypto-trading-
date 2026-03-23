@@ -39,6 +39,9 @@ import {
 } from './dto/wallet.dto';
 import { UserWallet } from 'src/entities/user-wallet.entity';
 import { WalletTransaction } from 'src/entities/wallet-transaction.entity';
+import { InjectQueue } from '@nestjs/bull';
+import type { Queue } from 'bull';
+import { QUEUE_PAYOUT, JOB_INITIATE_PAYOUT } from '../queue/queue.constants';
 
 @Injectable()
 export class WalletService {
@@ -66,6 +69,8 @@ export class WalletService {
     @InjectRepository(AuditLog)
     private auditRepo: Repository<AuditLog>,
 
+    @InjectQueue(QUEUE_PAYOUT)
+    private payoutQueue: Queue,
     private monnifyService: MonnifyService,
     private dataSource: DataSource,
   ) {}
@@ -480,7 +485,8 @@ export class WalletService {
     dto: WithdrawTobankDto,
   ): Promise<{
     message: string;
-    payoutId: string;
+    jobId: string | number;
+    reference: string;
     amount: number;
     bankAccount: string;
   }> {
@@ -576,30 +582,30 @@ export class WalletService {
       );
     });
 
-    // ── Trigger Flutterwave payout directly ──────────────────────────────────────
+    // ── Trigger Monnify payout directly ──────────────────────────────────────
     // No synthetic transaction needed — wallet NGN is already converted and final
     try {
-      const payout = await this.monnifyService.initiateDirectPayout({
-        userId,
-        amountNgn: dto.amount,
-        bankAccountId: dto.bankAccountId,
-        narration: dto.narration ?? 'CryptoPay NG wallet withdrawal',
-        reference,
-      });
-
-      await this.saveAudit(
-        userId,
-        AuditActorType.USER,
-        'wallet.withdrawal',
-        'user_wallets',
-        wallet.id,
-        { balance: Number(wallet.balanceNgn) },
-        { amount: dto.amount, payoutId: payout.id, reference },
+      const payoutJob = await this.payoutQueue.add(
+        JOB_INITIATE_PAYOUT,
+        {
+          userId: userId,
+          amountNgn: dto.amount,
+          bankAccountId: dto.bankAccountId,
+          narration: dto.narration ?? 'CryptoPay NG wallet withdrawal',
+          reference,
+          isAutoCashout: false,
+        },
+        {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 3000 },
+          jobId: `payout-wallet-${reference}`,
+        },
       );
 
       return {
-        message: 'Withdrawal initiated successfully',
-        payoutId: payout.id,
+        message: 'Withdrawal queued successfully',
+        jobId: payoutJob.id,
+        reference,
         amount: dto.amount,
         bankAccount: `${bankAccount.bankName} ****${bankAccount.accountNumber.slice(-4)}`,
       };

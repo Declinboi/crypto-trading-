@@ -36,6 +36,12 @@ import { WalletService } from 'src/wallet/wallet.service';
 import { MonnifyService } from '../monnify/monnify.service';
 import { QuidaxService } from 'src/quidax/quidax.service';
 
+import { InjectQueue } from '@nestjs/bull';
+import type { Queue } from 'bull';
+import { QUEUE_PAYMENT, JOB_PROCESS_PAYMENT } from '../queue/queue.constants';
+import { KafkaService } from '../kafka/kafka.service';
+import { KafkaTopic } from '../kafka/kafka.constants';
+
 // NowPayments coin → our CoinType mapping
 const COIN_MAP: Record<string, CoinType> = {
   usdttrc20: CoinType.USDT_TRC20,
@@ -105,6 +111,10 @@ export class NowpaymentsService {
 
     @InjectRepository(AuditLog)
     private auditRepo: Repository<AuditLog>,
+
+    @InjectQueue(QUEUE_PAYMENT)
+    private paymentQueue: Queue,
+    private kafkaService: KafkaService,
 
     private systemWalletService: SystemWalletService,
 
@@ -211,19 +221,57 @@ export class NowpaymentsService {
       order: { fetchedAt: 'DESC' },
     });
 
-    if (!rate) {
-      throw new NotFoundException(`No exchange rate found for ${coin}`);
-    }
+    if (!rate || rate.expiresAt < new Date()) {
+      this.logger.warn(`Rate for ${coin} stale or missing — fetching fresh`);
 
-    // If rate is expired, fetch fresh
-    if (rate.expiresAt < new Date()) {
-      this.logger.warn(`Rate for ${coin} expired, fetching fresh rate`);
-      const freshRates = await this.fetchLiveRates();
-      const fresh = freshRates.find((r) => r.coin === coin);
-      if (fresh) return fresh;
+      // Fetch only the single coin needed, not all 7
+      const freshRates = await this.fetchSingleRate(coin);
+      if (freshRates) return freshRates;
+
+      // If single fetch fails and we have a stale rate, return it anyway
+      if (rate) {
+        this.logger.warn(`Using stale rate for ${coin} — all providers failed`);
+        return rate;
+      }
+
+      throw new NotFoundException(`No exchange rate available for ${coin}`);
     }
 
     return rate;
+  }
+
+  // New targeted single-coin fetch
+  private async fetchSingleRate(coin: CoinType): Promise<ExchangeRate | null> {
+    try {
+      const currency = COIN_TO_NP[coin];
+      const res = await this.client.get(
+        `/estimate?amount=1&currency_from=${currency}&currency_to=usd`,
+      );
+      const coinUsdPrice = Number(res.data.estimated_amount ?? 0);
+      if (coinUsdPrice === 0) return null;
+
+      const usdNgnRate = await this.getUsdNgnRate();
+      const spreadPercent = Number(
+        this.config.get<string>('FX_SPREAD_PERCENT') ?? '1.5',
+      );
+      const effectiveUsdNgn = usdNgnRate * (1 + spreadPercent / 100);
+
+      return await this.rateRepo.save(
+        this.rateRepo.create({
+          coin,
+          coinUsdPrice,
+          usdNgnRate,
+          spreadPercent,
+          effectiveUsdNgn,
+          source: RateSource.NOWPAYMENTS,
+          fetchedAt: new Date(),
+          expiresAt: new Date(Date.now() + 60 * 1000),
+        }),
+      );
+    } catch (err) {
+      this.logger.error(`fetchSingleRate failed for ${coin}: ${err.message}`);
+      return null;
+    }
   }
 
   // ── GET ALL LATEST RATES ──────────────────────────────────────────────────────
@@ -629,8 +677,36 @@ export class NowpaymentsService {
 
       case 'confirmed':
       case 'finished':
-        await this.onPaymentConfirmed(invoice, transaction, dto);
+        await this.paymentQueue.add(
+          JOB_PROCESS_PAYMENT,
+          {
+            paymentId: dto.payment_id,
+            invoiceId: invoice.id,
+            userId: invoice.userId,
+            coin,
+            txHash: dto.payin_hash ?? null,
+            cryptoAmountReceived: Number(dto.actually_paid ?? dto.pay_amount),
+            paymentStatus: dto.payment_status,
+            rawWebhookPayload: dto,
+          },
+          {
+            attempts: 5,
+            backoff: { type: 'exponential', delay: 5000 },
+            jobId: `payment-${dto.payment_id}`, // idempotent job ID
+          },
+        );
+
+        // Publish to Kafka immediately for real-time streaming
+        await this.kafkaService.publish(KafkaTopic.PAYMENT_RECEIVED, {
+          paymentId: dto.payment_id,
+          invoiceId: invoice.id,
+          userId: invoice.userId,
+          coin,
+          receivedAt: new Date().toISOString(),
+        });
         break;
+      // await this.onPaymentConfirmed(invoice, transaction, dto);
+      // break;
 
       case 'failed':
       case 'refunded':
