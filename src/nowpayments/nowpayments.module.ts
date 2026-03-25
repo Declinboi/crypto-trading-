@@ -12,7 +12,7 @@ import { Notification } from '../entities/notification.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { SystemWalletModule } from '../system-wallet/system-wallet.module';
 import { WalletModule } from 'src/wallet/wallet.module';
-import { MonnifyModule } from 'src/monnify/monnify.module';
+import { FlutterwaveModule } from '../flutterwave/flutterwave.module';
 import { QuidaxModule } from 'src/quidax/quidax.module';
 import { QUEUE_PAYMENT } from 'src/queue/queue.constants';
 import { BullModule } from '@nestjs/bull';
@@ -33,7 +33,7 @@ import { BullModule } from '@nestjs/bull';
     BullModule.registerQueue({ name: QUEUE_PAYMENT }),
     SystemWalletModule,
     WalletModule,
-    MonnifyModule,
+    FlutterwaveModule,
     QuidaxModule,
   ],
   controllers: [NowpaymentsController],

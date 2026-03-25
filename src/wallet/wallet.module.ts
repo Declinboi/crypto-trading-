@@ -7,11 +7,11 @@ import { BankAccount } from '../entities/bank-account.entity';
 import { Transaction } from '../entities/transaction.entity';
 import { Notification } from '../entities/notification.entity';
 import { AuditLog } from '../entities/audit-log.entity';
-import { MonnifyModule } from '../monnify/monnify.module';
 import { UserWallet } from 'src/entities/user-wallet.entity';
 import { WalletTransaction } from 'src/entities/wallet-transaction.entity';
 import { QUEUE_PAYOUT } from 'src/queue/queue.constants';
 import { BullModule } from '@nestjs/bull';
+import { FlutterwaveModule } from 'src/flutterwave/flutterwave.module';
 
 @Module({
   imports: [
@@ -27,7 +27,7 @@ import { BullModule } from '@nestjs/bull';
     BullModule.registerQueue({
       name: QUEUE_PAYOUT, // ← this registers BullQueue_payout in this module
     }),
-    MonnifyModule,
+    FlutterwaveModule
   ],
   controllers: [WalletController],
   providers: [WalletService],

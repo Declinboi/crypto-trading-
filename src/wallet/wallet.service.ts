@@ -20,7 +20,6 @@ import { BankAccount } from '../entities/bank-account.entity';
 import { Transaction } from '../entities/transaction.entity';
 import { Notification } from '../entities/notification.entity';
 import { AuditLog } from '../entities/audit-log.entity';
-import { MonnifyService } from '../monnify/monnify.service';
 import {
   AuditActorType,
   NotificationType,
@@ -42,6 +41,7 @@ import { WalletTransaction } from 'src/entities/wallet-transaction.entity';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
 import { QUEUE_PAYOUT, JOB_INITIATE_PAYOUT } from '../queue/queue.constants';
+import { FlutterwaveService } from 'src/flutterwave/flutterwave.service';
 
 @Injectable()
 export class WalletService {
@@ -71,7 +71,7 @@ export class WalletService {
 
     @InjectQueue(QUEUE_PAYOUT)
     private payoutQueue: Queue,
-    private monnifyService: MonnifyService,
+    private flutterwaveService: FlutterwaveService,
     private dataSource: DataSource,
   ) {}
 

@@ -9,7 +9,7 @@ import {
   JOB_EXPIRE_RATE_LOCKS,
   JOB_EXPIRE_INVOICES,
   JOB_RETRY_FAILED_PAYOUTS,
-  JOB_SYNC_MONNIFY_BALANCE,
+  JOB_SYNC_FLUTTERWAVE_BALANCE,
 } from '../queue.constants';
 
 @Injectable()
@@ -42,7 +42,7 @@ export class QueueScheduler implements OnModuleInit {
       JOB_FETCH_RATES,
       {},
       {
-        repeat: { cron: '*/1 * * * *' },
+        repeat: { cron: '*/9 * * * *' },
         jobId: 'recurring-rate-fetch',
         removeOnComplete: true,
         removeOnFail: false,
@@ -80,11 +80,11 @@ export class QueueScheduler implements OnModuleInit {
     );
 
     await this.payoutQueue.add(
-      JOB_SYNC_MONNIFY_BALANCE,
+      JOB_SYNC_FLUTTERWAVE_BALANCE,
       {},
       {
         repeat: { cron: '*/30 * * * *' },
-        jobId: 'recurring-monnify-sync',
+        jobId: 'recurring-flutterwave-sync',
         removeOnComplete: true,
       },
     );

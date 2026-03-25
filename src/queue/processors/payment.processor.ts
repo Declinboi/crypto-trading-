@@ -23,6 +23,9 @@ import {
 } from '../queue.constants';
 import { KafkaTopic } from '../../kafka/kafka.constants';
 import { CoinType } from '../../entities/enums';
+import { Invoice } from 'src/entities/invoice.entity';
+import { Repository } from 'typeorm/repository/Repository.js';
+import { Transaction } from 'src/entities';
 
 export interface ProcessPaymentJobData {
   paymentId: string;
@@ -65,8 +68,15 @@ export class PaymentProcessor {
   // ── PROCESS PAYMENT JOB ───────────────────────────────────────────────────────
   @Process(JOB_PROCESS_PAYMENT)
   async handleProcessPayment(job: Job<ProcessPaymentJobData>) {
-    const { paymentId, invoiceId, userId, coin, txHash, cryptoAmountReceived } =
-      job.data;
+    const {
+      paymentId,
+      invoiceId,
+      userId,
+      coin,
+      txHash,
+      cryptoAmountReceived,
+      rawWebhookPayload,
+    } = job.data;
 
     this.logger.log(
       `Processing payment job: paymentId=${paymentId} invoiceId=${invoiceId} attempt=${job.attemptsMade + 1}`,
@@ -85,31 +95,95 @@ export class PaymentProcessor {
         attempt: job.attemptsMade + 1,
       });
 
-      // If tx hash available — queue verification job
+      // ── Step 1: Quidax verification (anti-flash protection) ──────────────────
       if (txHash) {
-        await this.paymentQueue.add(
-          JOB_VERIFY_DEPOSIT,
-          {
-            txHash,
-            coin,
-            expectedAmount: cryptoAmountReceived,
-            invoiceId,
-            transactionId: paymentId,
-            nowpaymentsPaymentId: paymentId,
-            retryCount: 0,
-          },
-          {
-            attempts: 5,
-            backoff: { type: 'exponential', delay: 30000 },
-            delay: 5000,
-          },
+        const verification = await this.quidaxService.runFullVerification(
+          txHash,
+          coin,
+          cryptoAmountReceived,
+          paymentId,
+        );
+
+        if (!verification.passed) {
+          if (verification.result.isFlash) {
+            // Flash deposit — publish alert, do NOT retry
+            this.logger.error(`FLASH DEPOSIT BLOCKED: txHash=${txHash}`);
+            await this.kafkaService.publish(KafkaTopic.PAYMENT_FLASH_DETECTED, {
+              txHash,
+              coin,
+              invoiceId,
+              reason: verification.result.reason,
+              detectedAt: new Date().toISOString(),
+            });
+            return; // ← don't throw, don't retry flash deposits
+          }
+
+          // Not enough confirmations yet — throw so BullMQ retries
+          throw new Error(
+            `Verification not passed yet: ${verification.result.reason}`,
+          );
+        }
+
+        this.logger.log(
+          `Quidax verification PASSED: txHash=${txHash} confirmations=${verification.result.confirmations}`,
+        );
+
+        await this.kafkaService.publish(KafkaTopic.PAYMENT_VERIFIED, {
+          txHash,
+          coin,
+          invoiceId,
+          confirmations: verification.result.confirmations,
+          verifiedAt: new Date().toISOString(),
+        });
+      } else {
+        this.logger.warn(
+          `No txHash for paymentId=${paymentId} — skipping Quidax check, trusting NowPayments`,
         );
       }
 
+      // ── Step 2: Load invoice and transaction from DB ──────────────────────────
+      // const { Invoice } = await import('../../entities/invoice.entity');
+      // const { Transaction } = await import('../../entities/transaction.entity');
+
+      const invoiceRepo = this.nowpaymentsService[
+        'invoiceRepo'
+      ] as Repository<Invoice>;
+      const txRepo = this.nowpaymentsService[
+        'txRepo'
+      ] as Repository<Transaction>;
+
+      const invoice = await invoiceRepo.findOne({ where: { id: invoiceId } });
+      const transaction = await txRepo.findOne({
+        where: { nowpaymentsPaymentId: paymentId },
+      });
+
+      if (!invoice || !transaction) {
+        throw new Error(
+          `Invoice or transaction not found: invoiceId=${invoiceId} paymentId=${paymentId}`,
+        );
+      }
+
+      // ── Step 3: Run the full payment confirmation logic ───────────────────────
+      await this.nowpaymentsService.onPaymentConfirmed(
+        invoice,
+        transaction,
+        rawWebhookPayload,
+      );
+
+      await this.kafkaService.publish(KafkaTopic.PAYMENT_CONFIRMED, {
+        paymentId,
+        invoiceId,
+        userId,
+        coin,
+        confirmedAt: new Date().toISOString(),
+      });
+
       this.logger.log(`Payment job completed: paymentId=${paymentId}`);
     } catch (err) {
-      this.logger.error(`Payment job failed: ${err.message}`, err.stack);
-      throw err; // BullMQ will retry
+      this.logger.error(
+        `Payment job failed: ${err.message} attempt=${job.attemptsMade + 1}`,
+      );
+      throw err; // BullMQ retries
     }
   }
 

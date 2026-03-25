@@ -17,4 +17,4 @@ export const JOB_VERIFY_DEPOSIT          = 'verify-deposit';
 export const JOB_EXPIRE_RATE_LOCKS       = 'expire-rate-locks';
 export const JOB_EXPIRE_INVOICES         = 'expire-invoices';
 export const JOB_RETRY_FAILED_PAYOUTS    = 'retry-failed-payouts';
-export const JOB_SYNC_MONNIFY_BALANCE    = 'sync-monnify-balance';
+export const JOB_SYNC_FLUTTERWAVE_BALANCE    = 'sync-flutterwave-balance';

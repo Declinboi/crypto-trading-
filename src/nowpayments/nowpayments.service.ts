@@ -33,7 +33,7 @@ import {
 } from '../entities/enums';
 import { NowpaymentsWebhookDto } from './dto/nowpayments.dto';
 import { WalletService } from 'src/wallet/wallet.service';
-import { MonnifyService } from '../monnify/monnify.service';
+
 import { QuidaxService } from 'src/quidax/quidax.service';
 
 import { InjectQueue } from '@nestjs/bull';
@@ -41,6 +41,7 @@ import type { Queue } from 'bull';
 import { QUEUE_PAYMENT, JOB_PROCESS_PAYMENT } from '../queue/queue.constants';
 import { KafkaService } from '../kafka/kafka.service';
 import { KafkaTopic } from '../kafka/kafka.constants';
+import { FlutterwaveService } from 'src/flutterwave/flutterwave.service';
 
 // NowPayments coin → our CoinType mapping
 const COIN_MAP: Record<string, CoinType> = {
@@ -86,7 +87,7 @@ export class NowpaymentsService {
   constructor(
     private config: ConfigService,
     private walletService: WalletService,
-    private monnifyService: MonnifyService,
+    private flutterwaveService: FlutterwaveService,
 
     @InjectRepository(Invoice)
     private invoiceRepo: Repository<Invoice>,
@@ -167,28 +168,30 @@ export class NowpaymentsService {
     const coins = Object.values(CoinType);
     const savedRates: ExchangeRate[] = [];
 
+    // ── Fetch USD/NGN rate ONCE outside the loop ──────────────────────────────
+    // Avoids calling Coinbase/ExchangeRate-API 7 times per cycle
+    const usdNgnRate = await this.getUsdNgnRate();
+    const spreadPercent = Number(
+      this.config.get<string>('FX_SPREAD_PERCENT') ?? '1.5',
+    );
+    const effectiveUsdNgn = usdNgnRate * (1 + spreadPercent / 100);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 min TTL
+
+    this.logger.log(
+      `USD/NGN for this cycle: raw=${usdNgnRate} effective=${effectiveUsdNgn} (spread=${spreadPercent}%)`,
+    );
+
     for (const coin of coins) {
       try {
         const currency = COIN_TO_NP[coin];
 
-        // Get coin → USD estimated price
         const res = await this.client.get(
           `/estimate?amount=1&currency_from=${currency}&currency_to=usd`,
         );
         const coinUsdPrice = Number(res.data.estimated_amount ?? 0);
-
         if (coinUsdPrice === 0) continue;
 
-        // Get USD/NGN rate from provider
-        const usdNgnRate = await this.getUsdNgnRate();
-
-        const spreadPercent = Number(
-          this.config.get<string>('FX_SPREAD_PERCENT') ?? '1.5',
-        );
-        const effectiveUsdNgn = usdNgnRate * (1 + spreadPercent / 100);
-
-        const expiresAt = new Date(Date.now() + 60 * 1000); // 60 seconds TTL
-
+        // Reuse the single USD/NGN rate fetched above
         const rate = this.rateRepo.create({
           coin,
           coinUsdPrice,
@@ -250,7 +253,7 @@ export class NowpaymentsService {
       const coinUsdPrice = Number(res.data.estimated_amount ?? 0);
       if (coinUsdPrice === 0) return null;
 
-      const usdNgnRate = await this.getUsdNgnRate();
+      const usdNgnRate = await this.getUsdNgnRate(); // single call here is fine
       const spreadPercent = Number(
         this.config.get<string>('FX_SPREAD_PERCENT') ?? '1.5',
       );
@@ -265,7 +268,7 @@ export class NowpaymentsService {
           effectiveUsdNgn,
           source: RateSource.NOWPAYMENTS,
           fetchedAt: new Date(),
-          expiresAt: new Date(Date.now() + 60 * 1000),
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
         }),
       );
     } catch (err) {
@@ -746,7 +749,7 @@ export class NowpaymentsService {
     );
   }
 
-  private async onPaymentConfirmed(
+  async onPaymentConfirmed(
     invoice: Invoice,
     transaction: Transaction,
     dto: NowpaymentsWebhookDto,
@@ -980,8 +983,8 @@ export class NowpaymentsService {
         },
       );
 
-      // Trigger Monnify direct payout — no wallet involved
-      const payout = await this.monnifyService.initiateDirectPayout({
+      // Trigger Flutterwave direct payout — no wallet involved
+      const payout = await this.flutterwaveService.initiateDirectPayout({
         userId: invoice.userId,
         amountNgn: netNgnAmount,
         bankAccountId: invoice.autoCashoutBankAccountId!,
@@ -1193,10 +1196,8 @@ export class NowpaymentsService {
   private async getUsdNgnRate(): Promise<number> {
     // Try each provider in order — first success wins
     const providers = [
-      () => this.getRateFromCoinbase(),
       () => this.getRateFromExchangeRateApi(),
-      () => this.getRateFromOpenExchangeRates(),
-      () => this.getRateFromCurrencyApi(),
+      () => this.getRateFromCoinbase(),
     ];
 
     for (const provider of providers) {
@@ -1207,7 +1208,9 @@ export class NowpaymentsService {
           return rate;
         }
       } catch (err) {
-        this.logger.warn(`Rate provider failed: ${err.message}`);
+        this.logger.warn(
+          `Rate provider [Coinbase] failed: ${err.message ?? err.code ?? 'unknown error'}`,
+        );
       }
     }
 
@@ -1229,18 +1232,28 @@ export class NowpaymentsService {
 
   // ── Provider 1: Coinbase (no API key needed for spot prices) ──────────────────
   private async getRateFromCoinbase(): Promise<number> {
-    // Coinbase gives NGN/USD — we need USD/NGN so we invert
-    const res = await axios.get(
-      'https://api.coinbase.com/v2/exchange-rates?currency=USD',
-      { timeout: 8000 },
-    );
+    try {
+      const res = await axios.get(
+        'https://api.coinbase.com/v2/exchange-rates?currency=USD',
+        { timeout: 8000 },
+      );
 
-    const ngnRate = res.data?.data?.rates?.NGN;
-    if (!ngnRate) throw new Error('NGN rate not in Coinbase response');
+      const ngnRate = res.data?.data?.rates?.NGN;
+      if (!ngnRate) throw new Error('NGN rate not found in Coinbase response');
 
-    const rate = Number(ngnRate);
-    this.logger.debug(`Coinbase USD/NGN: ${rate}`);
-    return rate;
+      const rate = Number(ngnRate);
+      this.logger.debug(`Coinbase USD/NGN: ${rate}`);
+      return rate;
+    } catch (err) {
+      // Rethrow with detail so the caller logs it properly
+      const reason = err.response?.status
+        ? `HTTP ${err.response.status} — ${err.response?.data?.message ?? 'no detail'}`
+        : err.code
+          ? `Network error: ${err.code}`
+          : err.message || 'Unknown error';
+
+      throw new Error(`Coinbase: ${reason}`);
+    }
   }
 
   // ── Provider 2: ExchangeRate-API (free tier, 1500 req/month) ──────────────────
@@ -1256,40 +1269,6 @@ export class NowpaymentsService {
     if (!rate) throw new Error('NGN rate not in ExchangeRate-API response');
 
     this.logger.debug(`ExchangeRate-API USD/NGN: ${rate}`);
-    return Number(rate);
-  }
-
-  // ── Provider 3: Open Exchange Rates (free tier needs app_id) ──────────────────
-  private async getRateFromOpenExchangeRates(): Promise<number> {
-    const appId = this.config.get<string>('OPEN_EXCHANGE_RATES_APP_ID');
-    if (!appId) throw new Error('OPEN_EXCHANGE_RATES_APP_ID not set');
-
-    const res = await axios.get(
-      `https://openexchangerates.org/api/latest.json?app_id=${appId}&symbols=NGN&base=USD`,
-      { timeout: 8000 },
-    );
-
-    const rate = res.data?.rates?.NGN;
-    if (!rate) throw new Error('NGN rate not in OpenExchangeRates response');
-
-    this.logger.debug(`OpenExchangeRates USD/NGN: ${rate}`);
-    return Number(rate);
-  }
-
-  // ── Provider 4: CurrencyAPI (free tier, 300 req/month) ────────────────────────
-  private async getRateFromCurrencyApi(): Promise<number> {
-    const apiKey = this.config.get<string>('CURRENCY_API_KEY');
-    if (!apiKey) throw new Error('CURRENCY_API_KEY not set');
-
-    const res = await axios.get(
-      `https://api.currencyapi.com/v3/latest?apikey=${apiKey}&currencies=NGN&base_currency=USD`,
-      { timeout: 8000 },
-    );
-
-    const rate = res.data?.data?.NGN?.value;
-    if (!rate) throw new Error('NGN rate not in CurrencyAPI response');
-
-    this.logger.debug(`CurrencyAPI USD/NGN: ${rate}`);
     return Number(rate);
   }
 

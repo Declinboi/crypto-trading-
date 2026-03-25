@@ -49,7 +49,7 @@ export enum TransactionStatus {
   FAILED = 'failed',
   EXPIRED = 'expired',
   REFUNDED = 'refunded',
-  BLOCKED    = 'blocked', 
+  BLOCKED = 'blocked',
 }
 
 export enum PayoutStatus {
@@ -80,7 +80,7 @@ export enum NotificationChannel {
 
 export enum WebhookSource {
   NOWPAYMENTS = 'nowpayments',
-  MONNIFY = 'monnify',
+  FLUTTERWAVE = 'flutterwave', // ← back to flutterwave
 }
 
 export enum AuditActorType {

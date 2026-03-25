@@ -8,11 +8,11 @@ import { NowpaymentsModule } from './nowpayments/nowpayments.module';
 
 import { WalletModule } from './wallet/wallet.module';
 import { InvoiceModule } from './invoice/invoice.module';
-import { MonnifyModule } from './monnify/monnify.module';
 import { RedisModule } from './redis/redis.module';
 import { AppCacheModule } from './cache/cache.module';
 import { KafkaModule } from './kafka/kafka.module';
 import { QueueModule } from './queue/queue.module';
+import { FlutterwaveModule } from './flutterwave/flutterwave.module';
 
 @Module({
   imports: [
@@ -29,7 +29,7 @@ import { QueueModule } from './queue/queue.module';
     KycModule,
     SystemWalletModule,
     NowpaymentsModule,
-    MonnifyModule,
+    FlutterwaveModule,
     WalletModule,
     InvoiceModule,
   ],

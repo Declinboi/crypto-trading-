@@ -4,7 +4,7 @@ import type { Job } from 'bull';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
-import { MonnifyService } from '../../monnify/monnify.service';
+import { FlutterwaveService } from '../../flutterwave/flutterwave.service';
 import { KafkaService } from '../../kafka/kafka.service';
 import { Payout } from '../../entities/payout.entity';
 import { PayoutStatus } from '../../entities/enums';
@@ -13,7 +13,7 @@ import {
   JOB_INITIATE_PAYOUT,
   JOB_RETRY_PAYOUT,
   JOB_RETRY_FAILED_PAYOUTS,
-  JOB_SYNC_MONNIFY_BALANCE,
+  JOB_SYNC_FLUTTERWAVE_BALANCE,
 } from '../queue.constants';
 import { KafkaTopic } from '../../kafka/kafka.constants';
 
@@ -39,7 +39,7 @@ export class PayoutProcessor {
   private readonly logger = new Logger(PayoutProcessor.name);
 
   constructor(
-    private monnifyService: MonnifyService,
+    private flutterwaveService: FlutterwaveService,
     private kafkaService: KafkaService,
 
     @InjectRepository(Payout)
@@ -65,7 +65,7 @@ export class PayoutProcessor {
     );
 
     try {
-      const payout = await this.monnifyService.initiateDirectPayout({
+      const payout = await this.flutterwaveService.initiateDirectPayout({
         userId,
         amountNgn,
         bankAccountId,
@@ -110,7 +110,7 @@ export class PayoutProcessor {
 
     this.logger.log(`Retrying payout: payoutId=${payoutId}`);
 
-    const payout = await this.monnifyService.retryPayout(payoutId, userId);
+    const payout = await this.flutterwaveService.retryPayout(payoutId, userId);
 
     await this.kafkaService.publish(KafkaTopic.PAYOUT_RETRIED, {
       payoutId,
@@ -147,7 +147,7 @@ export class PayoutProcessor {
       }
 
       try {
-        await this.monnifyService.retryPayout(payout.id, payout.userId);
+        await this.flutterwaveService.retryPayout(payout.id, payout.userId);
         retried++;
         this.logger.log(`Auto-retried payout ${payout.id}`);
       } catch (err) {
@@ -162,11 +162,11 @@ export class PayoutProcessor {
   }
 
   // ── SYNC MONNIFY BALANCE (scheduled) ──────────────────────────────────────────
-  @Process(JOB_SYNC_MONNIFY_BALANCE)
-  async handleSyncMonnifyBalance(job: Job) {
-    this.logger.log('Syncing Monnify wallet balance');
-    const payout = await this.monnifyService.getPayoutStats();
-    this.logger.log(`Monnify sync complete: ${JSON.stringify(payout.today)}`);
+  @Process(JOB_SYNC_FLUTTERWAVE_BALANCE)
+  async handleSyncFlutterwaveBalance(job: Job) {
+    this.logger.log('Syncing flutterwave wallet balance');
+    const payout = await this.flutterwaveService.getPayoutStats();
+    this.logger.log(`Flutterwave sync complete: ${JSON.stringify(payout.today)}`);
     return payout;
   }
 
