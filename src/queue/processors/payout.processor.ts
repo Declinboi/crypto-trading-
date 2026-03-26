@@ -139,7 +139,7 @@ export class PayoutProcessor {
     for (const payout of failedPayouts) {
       const isLiquidityFailure =
         payout.failureReason?.toLowerCase().includes('insufficient') ||
-        payout.failureReason?.toLowerCase().includes('monnify wallet');
+        payout.failureReason?.toLowerCase().includes('flutterwave wallet');
 
       if (!isLiquidityFailure || payout.retryCount >= 3) {
         skipped++;

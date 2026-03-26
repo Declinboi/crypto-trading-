@@ -582,7 +582,7 @@ export class WalletService {
       );
     });
 
-    // ── Trigger Monnify payout directly ──────────────────────────────────────
+    // ── Trigger Flutterwave payout directly ──────────────────────────────────────
     // No synthetic transaction needed — wallet NGN is already converted and final
     try {
       const payoutJob = await this.payoutQueue.add(

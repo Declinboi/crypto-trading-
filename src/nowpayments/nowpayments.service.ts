@@ -708,8 +708,6 @@ export class NowpaymentsService {
           receivedAt: new Date().toISOString(),
         });
         break;
-      // await this.onPaymentConfirmed(invoice, transaction, dto);
-      // break;
 
       case 'failed':
       case 'refunded':
