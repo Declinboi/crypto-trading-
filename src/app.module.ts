@@ -13,6 +13,7 @@ import { AppCacheModule } from './cache/cache.module';
 import { KafkaModule } from './kafka/kafka.module';
 import { QueueModule } from './queue/queue.module';
 import { FlutterwaveModule } from './flutterwave/flutterwave.module';
+import { EmailModule } from './email/email.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { FlutterwaveModule } from './flutterwave/flutterwave.module';
     FlutterwaveModule,
     WalletModule,
     InvoiceModule,
+    EmailModule,
   ],
   controllers: [],
   providers: [],

@@ -25,6 +25,8 @@ import {
   QUEUE_INVOICE_EXPIRE,
 } from './queue.constants';
 import { FlutterwaveModule } from 'src/flutterwave/flutterwave.module';
+import { User } from 'src/entities';
+import { EmailModule } from 'src/email/email.module';
 
 const queues = [
   QUEUE_PAYMENT,
@@ -55,11 +57,12 @@ const queues = [
       inject: [ConfigService],
     }),
     ...queues.map((name) => BullModule.registerQueue({ name })),
-    TypeOrmModule.forFeature([Payout, Notification]),
+    TypeOrmModule.forFeature([Payout, Notification, User]),
     NowpaymentsModule,
     FlutterwaveModule,
     QuidaxModule,
     KafkaModule,
+    EmailModule,
   ],
   providers: [
     PaymentProcessor,
