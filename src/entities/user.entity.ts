@@ -39,14 +39,6 @@ export class User {
   @Column({ type: 'varchar', length: 100, name: 'last_name' })
   lastName: string;
 
-  @Column({
-    type: 'varchar',
-    length: 200,
-    name: 'business_name',
-    nullable: true,
-  })
-  businessName: string | null;
-
   @Column({ type: 'text', name: 'avatar_url', nullable: true })
   avatarUrl: string | null;
 

@@ -27,6 +27,7 @@ import {
   NotificationChannel,
   TwoFaMethod,
 } from '../entities/enums';
+import { EmailService } from '../email/email.service';
 import {
   RegisterDto,
   LoginDto,
@@ -59,8 +60,6 @@ const refreshTokenStore = new Map<
   { userId: string; expiresAt: Date }
 >();
 const pinResetTokens = new Map<string, { userId: string; expiresAt: Date }>();
-
-// Tracks users who have passed password check but not OTP yet
 const pendingTwoFaStore = new Map<
   string,
   { userId: string; expiresAt: Date }
@@ -80,6 +79,7 @@ export class AuthService {
 
     private jwtService: JwtService,
     private config: ConfigService,
+    private emailService: EmailService,
   ) {}
 
   // ── REGISTER ──────────────────────────────────────────────────────────────────
@@ -114,29 +114,44 @@ export class AuthService {
       passwordHash,
       firstName: dto.firstName,
       lastName: dto.lastName,
-      businessName: dto.businessName ?? null,
       referralCode,
       referredById: referredBy?.id ?? null,
       role: UserRole.USER,
       kycStatus: KycStatus.PENDING,
-      twoFaEnabled: true, // email OTP on by default
+      twoFaEnabled: true,
       twoFaMethod: TwoFaMethod.EMAIL,
     });
 
     await this.userRepo.save(user);
 
     const verifyToken = await this.createEmailVerifyToken(user.id);
+    const verifyLink = `${this.config.get('APP_URL')}/auth/verify-email?token=${verifyToken}`;
 
+    // In-app notification
     await this.notifRepo.save(
       this.notifRepo.create({
         userId: user.id,
         type: NotificationType.PAYMENT_WAITING,
-        channel: NotificationChannel.EMAIL,
+        channel: NotificationChannel.IN_APP,
         title: 'Verify your CryptoPay NG account',
-        body: `Verify your email: ${this.config.get('APP_URL')}/auth/verify-email?token=${verifyToken}`,
+        body: 'Verify your email to unlock full access.',
         data: { verifyToken },
       }),
     );
+
+    // Welcome email + verification email fired in parallel
+    // emailVerificationTemplate uses the `otp` field — we pass the link there
+    // since the template just renders whatever is in that slot
+    await Promise.allSettled([
+      this.emailService.sendWelcome(user.email, {
+        firstName: user.firstName,
+        email: user.email,
+      }),
+      this.emailService.sendEmailVerification(user.email, {
+        firstName: user.firstName,
+        otp: verifyLink,
+      }),
+    ]);
 
     await this.saveAudit(
       user.id,
@@ -150,7 +165,6 @@ export class AuthService {
     );
 
     const tokens = await this.generateTokens(user);
-
     return {
       message: 'Registration successful. Please verify your email.',
       user: this.sanitizeUser(user),
@@ -159,12 +173,6 @@ export class AuthService {
   }
 
   // ── LOGIN ─────────────────────────────────────────────────────────────────────
-  // Flow:
-  //  Step 1 — POST /auth/login { email, password }
-  //         → if email 2FA:         returns { requiresOtp: true, twoFaMethod: 'email', tempToken }
-  //         → if authenticator 2FA: returns { requiresOtp: true, twoFaMethod: 'authenticator', tempToken }
-  //  Step 2 — POST /auth/login/verify-otp { tempToken, otpCode }
-  //         → returns { accessToken, refreshToken, user }
   async login(dto: LoginDto, ipAddress?: string) {
     const user = await this.userRepo.findOne({
       where: { email: dto.email },
@@ -200,17 +208,15 @@ export class AuthService {
 
     // ── 2FA gate ────────────────────────────────────────────────────────────────
     if (user.twoFaEnabled) {
-      // If no OTP provided yet — send OTP (email) or prompt (authenticator)
       if (!dto.otpCode) {
         if (user.twoFaMethod === TwoFaMethod.EMAIL) {
-          await this.sendEmailOtp(user);
+          await this.sendEmailOtp(user, ipAddress);
         }
 
-        // Issue a short-lived temp token to tie Step 2 back to this user
         const tempToken = crypto.randomBytes(32).toString('hex');
         pendingTwoFaStore.set(tempToken, {
           userId: user.id,
-          expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
         });
 
         return {
@@ -224,7 +230,6 @@ export class AuthService {
         };
       }
 
-      // OTP was provided inline — validate it directly
       await this.validateOtpCode(user, dto.otpCode);
     }
 
@@ -279,12 +284,10 @@ export class AuthService {
       ],
     });
 
-    if (!user || !user.isActive) {
+    if (!user || !user.isActive)
       throw new UnauthorizedException('User not found');
-    }
 
     await this.validateOtpCode(user, dto.otp);
-
     pendingTwoFaStore.delete(tempToken);
 
     await this.userRepo.update(user.id, { lastLoginAt: new Date() });
@@ -308,7 +311,7 @@ export class AuthService {
   }
 
   // ── RESEND LOGIN OTP ──────────────────────────────────────────────────────────
-  async resendLoginOtp(tempToken: string) {
+  async resendLoginOtp(tempToken: string, ipAddress?: string) {
     const pending = pendingTwoFaStore.get(tempToken);
     if (!pending || pending.expiresAt < new Date()) {
       throw new UnauthorizedException('Session expired. Please log in again.');
@@ -316,7 +319,7 @@ export class AuthService {
 
     const user = await this.userRepo.findOne({
       where: { id: pending.userId },
-      select: ['id', 'email', 'twoFaMethod'],
+      select: ['id', 'email', 'firstName', 'twoFaMethod'],
     });
 
     if (!user) throw new NotFoundException('User not found');
@@ -327,8 +330,7 @@ export class AuthService {
       );
     }
 
-    await this.sendEmailOtp(user);
-
+    await this.sendEmailOtp(user, ipAddress);
     return { message: 'OTP resent to your email address' };
   }
 
@@ -410,16 +412,23 @@ export class AuthService {
     }
 
     const token = await this.createEmailVerifyToken(user.id);
+    const verifyLink = `${this.config.get('APP_URL')}/auth/verify-email?token=${token}`;
+
     await this.notifRepo.save(
       this.notifRepo.create({
         userId: user.id,
         type: NotificationType.PAYMENT_WAITING,
-        channel: NotificationChannel.EMAIL,
+        channel: NotificationChannel.IN_APP,
         title: 'Verify your CryptoPay NG account',
-        body: `Verify your email: ${this.config.get('APP_URL')}/auth/verify-email?token=${token}`,
+        body: 'Verify your email to unlock full access.',
         data: { token },
       }),
     );
+
+    await this.emailService.sendEmailVerification(user.email, {
+      firstName: user.firstName,
+      otp: verifyLink,
+    });
 
     return {
       message: 'If your email exists and is unverified, a link has been sent.',
@@ -433,6 +442,8 @@ export class AuthService {
       return { message: 'If that email exists, a reset link has been sent.' };
 
     const token = crypto.randomBytes(32).toString('hex');
+    const resetLink = `${this.config.get('APP_URL')}/auth/reset-password?token=${token}`;
+
     passwordResetTokens.set(token, {
       userId: user.id,
       expiresAt: new Date(Date.now() + 15 * 60 * 1000),
@@ -442,12 +453,17 @@ export class AuthService {
       this.notifRepo.create({
         userId: user.id,
         type: NotificationType.PAYMENT_WAITING,
-        channel: NotificationChannel.EMAIL,
+        channel: NotificationChannel.IN_APP,
         title: 'Reset your CryptoPay NG password',
-        body: `Reset link: ${this.config.get('APP_URL')}/auth/reset-password?token=${token}. Expires in 15 minutes.`,
+        body: 'A password reset was requested for your account.',
         data: { token },
       }),
     );
+
+    await this.emailService.sendPasswordReset(user.email, {
+      firstName: user.firstName,
+      resetLink,
+    });
 
     await this.saveAudit(
       user.id,
@@ -529,9 +545,6 @@ export class AuthService {
   }
 
   // ── 2FA: SWITCH TO AUTHENTICATOR APP ──────────────────────────────────────────
-  // Flow:
-  //   Step 1 — GET /auth/2fa/authenticator/setup  → returns secret + QR code
-  //   Step 2 — POST /auth/2fa/authenticator/confirm { code } → verifies and switches
   async setup2FAAuthenticator(userId: string) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
@@ -550,7 +563,6 @@ export class AuthService {
       length: 20,
     });
 
-    // Store secret temporarily — only activated after user confirms a valid code
     await this.userRepo.update(userId, { twoFaSecret: secret.base32 });
     const qrCode = await qrcode.toDataURL(secret.otpauth_url!);
 
@@ -604,7 +616,6 @@ export class AuthService {
       'users',
       userId,
     );
-
     return { message: 'Authenticator app 2FA enabled successfully' };
   }
 
@@ -620,7 +631,6 @@ export class AuthService {
       throw new BadRequestException('You are already using email 2FA');
     }
 
-    // Confirm with current authenticator code before switching
     const valid = speakeasy.totp.verify({
       secret: user.twoFaSecret!,
       encoding: 'base32',
@@ -631,7 +641,7 @@ export class AuthService {
 
     await this.userRepo.update(userId, {
       twoFaMethod: TwoFaMethod.EMAIL,
-      twoFaSecret: null, // wipe the TOTP secret
+      twoFaSecret: null,
     });
 
     await this.saveAudit(
@@ -641,7 +651,6 @@ export class AuthService {
       'users',
       userId,
     );
-
     return { message: 'Switched back to email 2FA successfully' };
   }
 
@@ -742,14 +751,16 @@ export class AuthService {
   async forgotPin(userId: string) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
-      select: ['id', 'email', 'isPinSet'],
+      select: ['id', 'email', 'firstName', 'isPinSet'],
     });
     if (!user) throw new NotFoundException('User not found');
     if (!user.isPinSet) {
       throw new BadRequestException('No PIN has been set for this account');
     }
 
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const token = crypto.randomBytes(32).toString('hex');
+
     pinResetTokens.set(token, {
       userId: user.id,
       expiresAt: new Date(Date.now() + 15 * 60 * 1000),
@@ -759,12 +770,19 @@ export class AuthService {
       this.notifRepo.create({
         userId: user.id,
         type: NotificationType.PAYMENT_WAITING,
-        channel: NotificationChannel.EMAIL,
+        channel: NotificationChannel.IN_APP,
         title: 'Reset your CryptoPay NG transaction PIN',
-        body: `Reset your PIN: ${this.config.get('APP_URL')}/auth/reset-pin?token=${token}. Expires in 15 minutes.`,
+        body: 'A PIN reset was requested for your account.',
         data: { token },
       }),
     );
+
+    // pinResetTemplate uses the `otp` field — we pass the token so it renders
+    // in the OTP box and the user copies it into the reset-pin endpoint
+    await this.emailService.sendPinReset(user.email, {
+      firstName: user.firstName,
+      otp: token,
+    });
 
     await this.saveAudit(
       userId,
@@ -832,9 +850,9 @@ export class AuthService {
   }
 
   // ── PRIVATE: SEND EMAIL OTP ───────────────────────────────────────────────────
-  private async sendEmailOtp(user: User) {
-    const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+  private async sendEmailOtp(user: User, ipAddress?: string) {
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await this.userRepo.update(user.id, {
       emailOtp: otp,
@@ -845,18 +863,23 @@ export class AuthService {
       this.notifRepo.create({
         userId: user.id,
         type: NotificationType.PAYMENT_WAITING,
-        channel: NotificationChannel.EMAIL,
+        channel: NotificationChannel.IN_APP,
         title: 'Your CryptoPay NG login code',
-        body: `Your login OTP is: ${otp}. It expires in 10 minutes. Do not share this with anyone.`,
+        body: `Your login OTP is: ${otp}. Expires in 10 minutes.`,
         data: { otp },
       }),
     );
+
+    await this.emailService.sendTwoFAOtp(user.email, {
+      firstName: user.firstName,
+      otp,
+      ipAddress,
+    });
   }
 
-  // ── PRIVATE: VALIDATE OTP (works for both email and authenticator) ─────────────
+  // ── PRIVATE: VALIDATE OTP ─────────────────────────────────────────────────────
   private async validateOtpCode(user: User, code: string) {
     if (user.twoFaMethod === TwoFaMethod.EMAIL) {
-      // Re-fetch OTP fields if not already loaded
       const freshUser = await this.userRepo.findOne({
         where: { id: user.id },
         select: ['id', 'emailOtp', 'emailOtpExpiresAt'],
@@ -878,13 +901,11 @@ export class AuthService {
         throw new UnauthorizedException('Invalid OTP code');
       }
 
-      // Clear OTP after successful use
       await this.userRepo.update(user.id, {
         emailOtp: null,
         emailOtpExpiresAt: null,
       });
     } else {
-      // Authenticator app TOTP
       const freshUser = await this.userRepo.findOne({
         where: { id: user.id },
         select: ['id', 'twoFaSecret'],

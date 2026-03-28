@@ -79,10 +79,7 @@ export class EmailService {
   }
 
   // ── AUTH EMAILS ───────────────────────────────────────────────────────────────
-  async sendWelcome(
-    to: string,
-    data: { firstName: string; email: string; walletTag: string },
-  ) {
+  async sendWelcome(to: string, data: { firstName: string; email: string }) {
     return this.send({
       to,
       subject: `Welcome to CryptoPay NG, ${data.firstName}! 🎉`,

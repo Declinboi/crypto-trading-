@@ -1,10 +1,6 @@
 import { baseTemplate } from './base.template';
 
-export const welcomeTemplate = (data: {
-  firstName: string;
-  email: string;
-  walletTag: string;
-}) =>
+export const welcomeTemplate = (data: { firstName: string; email: string }) =>
   baseTemplate(
     `
   <h1>Welcome to CryptoPay NG 🎉</h1>
@@ -12,8 +8,7 @@ export const welcomeTemplate = (data: {
   <p>Your account has been created successfully. You can now receive crypto payments from anywhere in the world and get paid directly in Naira.</p>
 
   <div class="tag-box">
-    <div style="font-size:13px;color:#6b7280;margin-bottom:6px;">Your Wallet Tag</div>
-    <div class="tag">@${data.walletTag}</div>
+    
     <div style="font-size:12px;color:#9ca3af;margin-top:6px;">Share this tag to receive transfers from other users</div>
   </div>
 

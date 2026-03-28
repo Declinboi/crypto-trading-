@@ -109,7 +109,6 @@ export class NotificationProcessor {
         await this.emailService.sendWelcome(toEmail, {
           firstName,
           email: toEmail,
-          walletTag: data.walletTag,
         });
         break;
       case 'payment_received':
