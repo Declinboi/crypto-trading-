@@ -13,6 +13,8 @@ import {
   paymentReceivedTemplate,
   paymentWaitingTemplate,
   invoiceExpiredTemplate,
+  invoiceCreatedTemplate,
+  invoiceCancelledTemplate,
 } from './templates/payment.templates';
 import {
   payoutSuccessTemplate,
@@ -171,6 +173,24 @@ export class EmailService {
     });
   }
 
+  async sendInvoiceCreated(
+    to: string,
+    data: {
+      firstName: string;
+      invoiceNumber: string;
+      amountUsd: number;
+      title: string;
+      autoCashout: boolean;
+      invoiceLink: string;
+    },
+  ) {
+    return this.send({
+      to,
+      subject: `Invoice ${data.invoiceNumber} created — $${data.amountUsd}`,
+      html: invoiceCreatedTemplate(data),
+    });
+  }
+
   async sendInvoiceExpired(
     to: string,
     data: {
@@ -183,6 +203,21 @@ export class EmailService {
       to,
       subject: `Invoice ${data.invoiceNumber} has expired`,
       html: invoiceExpiredTemplate(data),
+    });
+  }
+
+  async sendInvoiceCancelled(
+    to: string,
+    data: {
+      firstName: string;
+      invoiceNumber: string;
+      amountUsd: number;
+    },
+  ) {
+    return this.send({
+      to,
+      subject: `Invoice ${data.invoiceNumber} cancelled`,
+      html: invoiceCancelledTemplate(data),
     });
   }
 

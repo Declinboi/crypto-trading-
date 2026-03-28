@@ -107,3 +107,58 @@ export const invoiceExpiredTemplate = (data: {
 `,
     `Payment window expired for invoice ${data.invoiceNumber}`,
   );
+
+export const invoiceCreatedTemplate = (data: {
+  firstName: string;
+  invoiceNumber: string;
+  amountUsd: number;
+  title: string;
+  autoCashout: boolean;
+  invoiceLink: string;
+}) =>
+  baseTemplate(
+    `
+  <h1>Invoice Created ✅</h1>
+  <p class="greeting">Hi ${data.firstName},</p>
+  <p>Your invoice has been created successfully.</p>
+
+  <table class="info-table">
+    <tr><td>Invoice</td><td>${data.invoiceNumber}</td></tr>
+    <tr><td>Title</td><td>${data.title}</td></tr>
+    <tr><td>Amount</td><td>$${data.amountUsd} USD</td></tr>
+    <tr><td>Auto-cashout</td><td>${data.autoCashout ? '✅ Enabled' : '❌ Disabled'}</td></tr>
+    <tr><td>Status</td><td><span class="status-badge status-pending">Draft</span></td></tr>
+  </table>
+
+  <div class="alert-box alert-info">
+    <p>📋 Share your payment link with your client to start receiving crypto payments.</p>
+  </div>
+
+  <div style="text-align:center;margin-top:24px;">
+    <a href="${data.invoiceLink}" class="btn">View Invoice →</a>
+  </div>
+`,
+    `Invoice ${data.invoiceNumber} created — $${data.amountUsd}`,
+  );
+
+export const invoiceCancelledTemplate = (data: {
+  firstName: string;
+  invoiceNumber: string;
+  amountUsd: number;
+}) =>
+  baseTemplate(
+    `
+  <h1>Invoice Cancelled</h1>
+  <p class="greeting">Hi ${data.firstName},</p>
+  <p>Invoice <strong>${data.invoiceNumber}</strong> ($${data.amountUsd}) has been cancelled.</p>
+
+  <div class="alert-box alert-warning">
+    <p>⚠️ This invoice is now cancelled. If you need to collect payment, please create a new invoice.</p>
+  </div>
+
+  <div style="text-align:center;margin-top:24px;">
+    <a href="${process.env.FRONTEND_URL}/invoices/new" class="btn">Create New Invoice →</a>
+  </div>
+`,
+    `Invoice ${data.invoiceNumber} has been cancelled`,
+  );

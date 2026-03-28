@@ -7,7 +7,6 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
-import { nanoid } from 'nanoid';
 
 import { Invoice } from '../entities/invoice.entity';
 import { InvoiceItem } from '../entities/invoice-item.entity';
@@ -15,18 +14,13 @@ import { BankAccount } from '../entities/bank-account.entity';
 import { User } from '../entities/user.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { Notification } from '../entities/notification.entity';
-import {
-  InvoiceStatus,
-  AuditActorType,
-  NotificationType,
-  NotificationChannel,
-  KycStatus,
-} from '../entities/enums';
+import { InvoiceStatus, AuditActorType, KycStatus } from '../entities/enums';
 import {
   CreateInvoiceDto,
   UpdateInvoiceDto,
   InvoiceQueryDto,
 } from './dto/invoice.dto';
+import { EmailService } from 'src/email/email.service';
 
 @Injectable()
 export class InvoiceService {
@@ -35,9 +29,6 @@ export class InvoiceService {
   constructor(
     @InjectRepository(Invoice)
     private invoiceRepo: Repository<Invoice>,
-
-    @InjectRepository(InvoiceItem)
-    private itemRepo: Repository<InvoiceItem>,
 
     @InjectRepository(BankAccount)
     private bankAccountRepo: Repository<BankAccount>,
@@ -48,8 +39,7 @@ export class InvoiceService {
     @InjectRepository(AuditLog)
     private auditRepo: Repository<AuditLog>,
 
-    @InjectRepository(Notification)
-    private notifRepo: Repository<Notification>,
+    private emailService: EmailService,
 
     private dataSource: DataSource,
   ) {}
@@ -61,7 +51,10 @@ export class InvoiceService {
 
     // KYC check for large invoices
     const KYC_THRESHOLD = 500;
-    if (dto.amountUsd > KYC_THRESHOLD && user.kycStatus !== KycStatus.VERIFIED) {
+    if (
+      dto.amountUsd > KYC_THRESHOLD &&
+      user.kycStatus !== KycStatus.VERIFIED
+    ) {
       throw new ForbiddenException(
         `KYC verification required for invoices above $${KYC_THRESHOLD}. Please complete your KYC first.`,
       );
@@ -120,8 +113,12 @@ export class InvoiceService {
     );
 
     await this.saveAudit(
-      userId, AuditActorType.USER, 'invoice.created',
-      'invoices', invoice.id, null,
+      userId,
+      AuditActorType.USER,
+      'invoice.created',
+      'invoices',
+      invoice.id,
+      null,
       {
         invoiceNumber,
         amountUsd: dto.amountUsd,
@@ -129,6 +126,18 @@ export class InvoiceService {
         autoCashoutBankAccountId,
       },
     );
+    try {
+      await this.emailService.sendInvoiceCreated(user.email, {
+        firstName: user.firstName,
+        invoiceNumber,
+        amountUsd: dto.amountUsd,
+        title: dto.title,
+        autoCashout: dto.autoCashout ?? false,
+        invoiceLink: `${process.env.FRONTEND_URL}/invoices/${invoice.id}`,
+      });
+    } catch (err) {
+      this.logger.warn(`Failed to send invoice creation email: ${err.message}`);
+    }
 
     this.logger.log(
       `Invoice created: ${invoiceNumber} $${dto.amountUsd} autoCashout=${dto.autoCashout ?? false} userId=${userId}`,
@@ -185,8 +194,13 @@ export class InvoiceService {
 
     if (!invoice) throw new NotFoundException('Invoice not found');
 
-    if (invoice.status === InvoiceStatus.CANCELLED) {
-      throw new BadRequestException('This invoice has been cancelled');
+    if (
+      invoice.status === InvoiceStatus.CANCELLED ||
+      invoice.status === InvoiceStatus.EXPIRED
+    ) {
+      throw new BadRequestException(
+        `This invoice is ${invoice.status}. Please request a new payment link.`,
+      );
     }
 
     // Only show safe public fields to the client — no internal IDs
@@ -240,9 +254,7 @@ export class InvoiceService {
     if (!invoice) throw new NotFoundException('Invoice not found');
 
     if (invoice.status !== InvoiceStatus.DRAFT) {
-      throw new BadRequestException(
-        'Only draft invoices can be updated',
-      );
+      throw new BadRequestException('Only draft invoices can be updated');
     }
 
     // Handle auto-cashout bank account change
@@ -255,13 +267,19 @@ export class InvoiceService {
           const bank = await this.bankAccountRepo.findOne({
             where: { id: bankId, userId, isVerified: true },
           });
-          if (!bank) throw new BadRequestException('Bank account not found or not verified');
+          if (!bank)
+            throw new BadRequestException(
+              'Bank account not found or not verified',
+            );
           autoCashoutBankAccountId = bank.id;
         } else {
           const defaultBank = await this.bankAccountRepo.findOne({
             where: { userId, isDefault: true, isVerified: true },
           });
-          if (!defaultBank) throw new BadRequestException('No verified default bank account found');
+          if (!defaultBank)
+            throw new BadRequestException(
+              'No verified default bank account found',
+            );
           autoCashoutBankAccountId = defaultBank.id;
         }
       } else {
@@ -278,27 +296,54 @@ export class InvoiceService {
       autoCashoutBankAccountId,
     });
 
-    return await this.invoiceRepo.findOne({ where: { id: invoiceId } }) as Invoice;
+    return (await this.invoiceRepo.findOne({
+      where: { id: invoiceId },
+    })) as Invoice;
   }
 
   // ── CANCEL INVOICE ────────────────────────────────────────────────────────────
-  async cancel(invoiceId: string, userId: string): Promise<{ message: string }> {
+  async cancel(
+    invoiceId: string,
+    userId: string,
+  ): Promise<{ message: string }> {
     const invoice = await this.invoiceRepo.findOne({
       where: { id: invoiceId, userId },
     });
 
     if (!invoice) throw new NotFoundException('Invoice not found');
-
-    if (invoice.status === InvoiceStatus.PAID) {
+    if (invoice.status === InvoiceStatus.PAID)
       throw new BadRequestException('Paid invoices cannot be cancelled');
-    }
-
-    if (invoice.status === InvoiceStatus.CANCELLED) {
+    if (invoice.status === InvoiceStatus.CANCELLED)
       throw new BadRequestException('Invoice is already cancelled');
-    }
 
-    await this.invoiceRepo.update(invoiceId, { status: InvoiceStatus.CANCELLED });
-    await this.saveAudit(userId, AuditActorType.USER, 'invoice.cancelled', 'invoices', invoiceId);
+    await this.invoiceRepo.update(invoiceId, {
+      status: InvoiceStatus.CANCELLED,
+    });
+    await this.saveAudit(
+      userId,
+      AuditActorType.USER,
+      'invoice.cancelled',
+      'invoices',
+      invoiceId,
+    );
+
+    // ── Notify user ──────────────────────────────────────────────────────────────
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['email', 'firstName'],
+    });
+
+    if (user) {
+      try {
+        await this.emailService.sendInvoiceCancelled(user.email, {
+          firstName: user.firstName,
+          invoiceNumber: invoice.invoiceNumber,
+          amountUsd: Number(invoice.amountUsd),
+        });
+      } catch (err) {
+        this.logger.warn(`Failed to send cancellation email: ${err.message}`);
+      }
+    }
 
     return { message: 'Invoice cancelled successfully' };
   }
@@ -348,9 +393,22 @@ export class InvoiceService {
   // ── PRIVATE HELPERS ───────────────────────────────────────────────────────────
   private async generateInvoiceNumber(): Promise<string> {
     const year = new Date().getFullYear();
-    const count = await this.invoiceRepo.count();
-    const seq = String(count + 1).padStart(4, '0');
-    return `INV-${year}-${seq}`;
+
+    // Use a DB sequence approach — find the last invoice number for this year
+    const lastInvoice = await this.invoiceRepo
+      .createQueryBuilder('inv')
+      .where('inv.invoice_number LIKE :pattern', { pattern: `INV-${year}-%` })
+      .orderBy('inv.invoice_number', 'DESC')
+      .select('inv.invoice_number', 'invoiceNumber')
+      .getRawOne();
+
+    let seq = 1;
+    if (lastInvoice?.invoiceNumber) {
+      const parts = lastInvoice.invoiceNumber.split('-');
+      seq = parseInt(parts[2] ?? '0', 10) + 1;
+    }
+
+    return `INV-${year}-${String(seq).padStart(4, '0')}`;
   }
 
   private async saveAudit(
@@ -364,7 +422,11 @@ export class InvoiceService {
   ) {
     await this.auditRepo.save(
       this.auditRepo.create({
-        userId, actorType, action, entityType, entityId,
+        userId,
+        actorType,
+        action,
+        entityType,
+        entityId,
         oldValues: oldValues ?? null,
         newValues: newValues ?? null,
       }),
