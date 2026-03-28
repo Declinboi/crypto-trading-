@@ -119,6 +119,9 @@ export class AuthService {
       role: UserRole.USER,
       kycStatus: KycStatus.PENDING,
       twoFaEnabled: true,
+      // New users always start on EMAIL 2FA.
+      // twoFaMethod only changes to AUTHENTICATOR after the user completes
+      // the full setup + confirm flow in /auth/2fa/authenticator/confirm.
       twoFaMethod: TwoFaMethod.EMAIL,
     });
 
@@ -140,8 +143,6 @@ export class AuthService {
     );
 
     // Welcome email + verification email fired in parallel
-    // emailVerificationTemplate uses the `otp` field — we pass the link there
-    // since the template just renders whatever is in that slot
     await Promise.allSettled([
       this.emailService.sendWelcome(user.email, {
         firstName: user.firstName,
@@ -206,12 +207,31 @@ export class AuthService {
     if (!passwordValid)
       throw new UnauthorizedException('Invalid email or password');
 
-    // ── 2FA gate ────────────────────────────────────────────────────────────────
+    // ── 2FA GATE ────────────────────────────────────────────────────────────────
+    //
+    // Routing rule:
+    //   • twoFaMethod === AUTHENTICATOR  →  user has completed the authenticator
+    //     setup + confirm flow; require a TOTP code from their app.
+    //     No email OTP is sent — the app is the source of truth.
+    //
+    //   • twoFaMethod === EMAIL (default) →  send a 6-digit OTP to the user's
+    //     email address and require it to complete login.
+    //
+    // twoFaMethod is set to EMAIL on registration and only switches to
+    // AUTHENTICATOR after the user calls /auth/2fa/authenticator/confirm with
+    // a valid TOTP code.  It reverts to EMAIL if the user calls
+    // /auth/2fa/email to switch back.
+    // ────────────────────────────────────────────────────────────────────────────
     if (user.twoFaEnabled) {
       if (!dto.otpCode) {
+        // No code submitted yet — kick off the challenge.
         if (user.twoFaMethod === TwoFaMethod.EMAIL) {
+          // Send a fresh OTP to the user's inbox.
           await this.sendEmailOtp(user, ipAddress);
         }
+        // For AUTHENTICATOR we don't send anything — the code comes from
+        // the app.  We still issue a tempToken so the client can submit
+        // the TOTP on the /auth/login/verify-otp endpoint.
 
         const tempToken = crypto.randomBytes(32).toString('hex');
         pendingTwoFaStore.set(tempToken, {
@@ -226,10 +246,12 @@ export class AuthService {
           message:
             user.twoFaMethod === TwoFaMethod.EMAIL
               ? 'OTP sent to your email. Enter the code to complete login.'
-              : 'Enter the code from your authenticator app to complete login.',
+              : 'Enter the 6-digit code from your authenticator app to complete login.',
         };
       }
 
+      // Code was submitted inline with the login request — validate it
+      // immediately without a round-trip through verifyLoginOtp.
       await this.validateOtpCode(user, dto.otpCode);
     }
 
@@ -287,6 +309,8 @@ export class AuthService {
     if (!user || !user.isActive)
       throw new UnauthorizedException('User not found');
 
+    // validateOtpCode already branches on twoFaMethod — EMAIL checks the
+    // stored OTP, AUTHENTICATOR runs speakeasy.totp.verify.
     await this.validateOtpCode(user, dto.otp);
     pendingTwoFaStore.delete(tempToken);
 
@@ -324,9 +348,11 @@ export class AuthService {
 
     if (!user) throw new NotFoundException('User not found');
 
+    // Resend is only meaningful for EMAIL — AUTHENTICATOR codes are generated
+    // locally on the device and never sent by the server.
     if (user.twoFaMethod !== TwoFaMethod.EMAIL) {
       throw new BadRequestException(
-        'OTP resend is only available for email 2FA',
+        'OTP resend is only available for email 2FA. Open your authenticator app to get a code.',
       );
     }
 
@@ -544,7 +570,16 @@ export class AuthService {
     return { message: 'Password changed successfully' };
   }
 
-  // ── 2FA: SWITCH TO AUTHENTICATOR APP ──────────────────────────────────────────
+  // ── 2FA: SWITCH TO AUTHENTICATOR APP ─────────────────────────────────────────
+  //
+  // Two-step flow:
+  //   1. GET  /auth/2fa/authenticator/setup   → generate secret + QR code
+  //   2. POST /auth/2fa/authenticator/confirm → verify first TOTP code,
+  //      then flip twoFaMethod to AUTHENTICATOR
+  //
+  // Until step 2 is completed the method stays EMAIL, so login is unaffected
+  // if the user abandons the setup midway.
+  // ─────────────────────────────────────────────────────────────────────────────
   async setup2FAAuthenticator(userId: string) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
@@ -563,6 +598,8 @@ export class AuthService {
       length: 20,
     });
 
+    // Store the secret now so confirm2FAAuthenticator can read it.
+    // twoFaMethod stays EMAIL until the user confirms with a valid TOTP.
     await this.userRepo.update(userId, { twoFaSecret: secret.base32 });
     const qrCode = await qrcode.toDataURL(secret.otpauth_url!);
 
@@ -602,6 +639,8 @@ export class AuthService {
     if (!valid)
       throw new BadRequestException('Invalid authenticator code. Try again.');
 
+    // Only NOW do we flip the method.  From this point forward, every login
+    // challenge will require a TOTP code from the app instead of an email OTP.
     await this.userRepo.update(userId, {
       twoFaMethod: TwoFaMethod.AUTHENTICATOR,
       twoFaEnabled: true,
@@ -620,6 +659,10 @@ export class AuthService {
   }
 
   // ── 2FA: SWITCH BACK TO EMAIL ─────────────────────────────────────────────────
+  //
+  // Requires a valid TOTP code to prove the user still has the device.
+  // After this, login reverts to sending a 6-digit OTP to email.
+  // ─────────────────────────────────────────────────────────────────────────────
   async switchToEmail2FA(userId: string, dto: SwitchToEmailDto) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
@@ -639,6 +682,8 @@ export class AuthService {
     });
     if (!valid) throw new BadRequestException('Invalid authenticator code');
 
+    // Flip back to EMAIL and wipe the TOTP secret.
+    // Next login will send an email OTP instead of prompting for the app.
     await this.userRepo.update(userId, {
       twoFaMethod: TwoFaMethod.EMAIL,
       twoFaSecret: null,
@@ -777,8 +822,6 @@ export class AuthService {
       }),
     );
 
-    // pinResetTemplate uses the `otp` field — we pass the token so it renders
-    // in the OTP box and the user copies it into the reset-pin endpoint
     await this.emailService.sendPinReset(user.email, {
       firstName: user.firstName,
       otp: token,
@@ -878,6 +921,14 @@ export class AuthService {
   }
 
   // ── PRIVATE: VALIDATE OTP ─────────────────────────────────────────────────────
+  //
+  // Branches strictly on twoFaMethod:
+  //   EMAIL         → compare against the stored emailOtp (6-digit string match)
+  //   AUTHENTICATOR → run speakeasy.totp.verify against twoFaSecret (TOTP)
+  //
+  // This is the single source of truth for OTP validation; both the inline
+  // login path and the verifyLoginOtp endpoint call this method.
+  // ─────────────────────────────────────────────────────────────────────────────
   private async validateOtpCode(user: User, code: string) {
     if (user.twoFaMethod === TwoFaMethod.EMAIL) {
       const freshUser = await this.userRepo.findOne({
@@ -901,18 +952,23 @@ export class AuthService {
         throw new UnauthorizedException('Invalid OTP code');
       }
 
+      // Consume the OTP so it cannot be reused.
       await this.userRepo.update(user.id, {
         emailOtp: null,
         emailOtpExpiresAt: null,
       });
     } else {
+      // AUTHENTICATOR — verify TOTP against the stored secret.
+      // window: 1 allows ±30 s clock skew.
       const freshUser = await this.userRepo.findOne({
         where: { id: user.id },
         select: ['id', 'twoFaSecret'],
       });
 
       if (!freshUser?.twoFaSecret) {
-        throw new UnauthorizedException('Authenticator not configured');
+        throw new UnauthorizedException(
+          'Authenticator not configured. Please set up your authenticator app or switch to email 2FA.',
+        );
       }
 
       const valid = speakeasy.totp.verify({
@@ -922,7 +978,10 @@ export class AuthService {
         window: 1,
       });
 
-      if (!valid) throw new UnauthorizedException('Invalid authenticator code');
+      if (!valid)
+        throw new UnauthorizedException(
+          'Invalid authenticator code. Check the code on your device and try again.',
+        );
     }
   }
 
