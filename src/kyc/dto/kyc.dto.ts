@@ -3,54 +3,54 @@ import {
   IsNotEmpty,
   IsEnum,
   IsOptional,
-  IsUrl,
   MaxLength,
   Matches,
+  IsDateString,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 
-export enum DocumentType {
-  NIN = 'nin',
-  BVN = 'bvn',
-  PASSPORT = 'passport',
-  DRIVERS_LICENSE = 'drivers_license',
-  VOTERS_CARD = 'voters_card',
+export enum KycVerificationType {
+  BVN = 'BVN',
+  NIN = 'NIN',
+  NIN_SLIP = 'NIN_SLIP',
 }
 
 export enum KycProvider {
-  SUMSUB = 'sumsub',
+  SMILE_IDENTITY = 'smile_identity',
   MANUAL = 'manual',
 }
 
-export class InitiateKycDto {
-  @IsEnum(DocumentType, { message: 'Invalid document type' })
-  documentType: DocumentType;
+export class InitiateBvnDto {
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^\d{11}$/, { message: 'BVN must be exactly 11 digits' })
+  bvn: string;
 }
 
-export class SubmitKycDto {
-  @IsEnum(DocumentType, { message: 'Invalid document type' })
-  documentType: DocumentType;
+export class InitiateNinDto {
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^\d{11}$/, { message: 'NIN must be exactly 11 digits' })
+  nin: string;
+}
+
+export class SubmitKycWithFaceDto {
+  @IsEnum(KycVerificationType)
+  idType: KycVerificationType;
 
   @IsString()
   @IsNotEmpty()
-  @MaxLength(100)
-  @Transform(({ value }) => value?.trim())
-  documentNumber: string;
+  @Matches(/^\d{11}$/, { message: 'ID number must be 11 digits' })
+  idNumber: string;
+
+  @IsString()
+  @IsNotEmpty()
+  // Base64 encoded selfie image
+  selfieImage: string;
 
   @IsOptional()
-  @IsString()
-  @MaxLength(255)
-  documentFrontUrl?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(255)
-  documentBackUrl?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(255)
-  selfieUrl?: string;
+  @IsDateString()
+  dateOfBirth?: string; // YYYY-MM-DD — required for some ID types
 }
 
 export class ReviewKycDto {
@@ -63,49 +63,44 @@ export class ReviewKycDto {
   rejectionReason?: string;
 }
 
-export class SumsubWebhookDto {
-  @IsString()
-  @IsNotEmpty()
-  applicantId: string;
+export class SmileWebhookDto {
+  job_id: string;
+  job_type: number;
+  smile_job_id: string;
+  partner_id: string;
+  result: SmileResult;
+  source_sdk: string;
+  timestamp: string;
+  signature: string;
+}
 
-  @IsString()
-  @IsNotEmpty()
-  inspectionId: string;
+export interface SmileResult {
+  ResultCode: string;
+  ResultText: string;
+  SmileJobID: string;
+  Actions: SmileActions;
+  FullData?: SmileFullData;
+  IsFinalResult: string;
+}
 
-  @IsString()
-  @IsNotEmpty()
-  applicantType: string;
+export interface SmileActions {
+  Liveness_Check: string;
+  Register_Selfie: string;
+  Selfie_To_ID_Face_Compare: string;
+  Verify_ID_Number: string;
+  Return_Personal_Info: string;
+  Human_Review_Compare?: string;
+  Human_Review_Liveness_Check?: string;
+}
 
-  @IsString()
-  @IsNotEmpty()
-  correlationId: string;
-
-  @IsString()
-  @IsNotEmpty()
-  levelName: string;
-
-  @IsString()
-  @IsNotEmpty()
-  externalUserId: string;
-
-  @IsString()
-  @IsNotEmpty()
-  type: string; // applicantReviewed | applicantPending | applicantCreated etc.
-
-  @IsOptional()
-  reviewResult?: {
-    reviewAnswer: 'GREEN' | 'RED';
-    rejectLabels?: string[];
-    reviewRejectType?: string;
-    moderationComment?: string;
-    clientComment?: string;
-  };
-
-  @IsString()
-  @IsNotEmpty()
-  reviewStatus: string;
-
-  @IsString()
-  @IsNotEmpty()
-  createdAt: string;
+export interface SmileFullData {
+  DOB?: string;
+  FullName?: string;
+  IDNumber?: string;
+  IDType?: string;
+  ExpirationDate?: string;
+  Gender?: string;
+  PhoneNumber?: string;
+  Country?: string;
+  SecondaryIDNumber?: string;
 }

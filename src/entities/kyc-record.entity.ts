@@ -68,8 +68,16 @@ export class KycRecord {
   @Column({ type: 'varchar', length: 50, nullable: true })
   provider: string | null; // youverify | smile_identity | manual
 
-  @Column({ type: 'varchar', length: 255, name: 'provider_ref', nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 255,
+    name: 'provider_ref',
+    nullable: true,
+  })
   providerRef: string | null;
+
+  @Column({ type: 'jsonb', nullable: true, default: null })
+  metadata: any;
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
