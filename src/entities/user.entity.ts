@@ -75,6 +75,18 @@ export class User {
   })
   twoFaMethod: TwoFaMethod;
 
+  @Column({
+    type: 'varchar',
+    length: 20,
+    name: 'phone',
+    nullable: true,
+    unique: true,
+  })
+  phone: string | null;
+
+  @Column({ type: 'boolean', name: 'is_phone_verified', default: false })
+  isPhoneVerified: boolean;
+
   @Column({ type: 'boolean', name: 'two_fa_enabled', default: true })
   twoFaEnabled: boolean; // always true by default since email OTP is default
 

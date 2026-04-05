@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -15,6 +15,7 @@ import { RolesGuard } from './guards/roles.guard';
 import { User } from '../entities/user.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { Notification } from '../entities/notification.entity';
+import { WhatsappModule } from 'src/whatsapp/whatsapp.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { Notification } from '../entities/notification.entity';
       }),
     }),
     TypeOrmModule.forFeature([User, AuditLog, Notification]),
+    forwardRef(() => WhatsappModule),
   ],
   controllers: [AuthController],
   providers: [

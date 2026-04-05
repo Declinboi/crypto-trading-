@@ -9,6 +9,7 @@ import {
   HttpStatus,
   Patch,
   Delete,
+  Ip,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { AuthService } from './auth.service';
@@ -31,6 +32,8 @@ import {
   VerifyEmailOtpDto,
   SwitchToAuthenticatorDto,
   SwitchToEmailDto,
+  SendPhoneOtpDto,
+  VerifyPhoneOtpDto,
 } from './dto/auth.dto';
 
 @Controller('api/v1/auth')
@@ -200,4 +203,17 @@ export class AuthController {
   removePin(@Body() dto: VerifyPinDto, @CurrentUser() user: User) {
     return this.authService.removePin(user.id, dto);
   }
+
+
+    @Post('phone/send-otp')
+   @UseGuards(JwtAuthGuard)
+   sendPhoneOtp(@CurrentUser() user, @Body() dto: SendPhoneOtpDto, @Ip() ip) {
+     return this.authService.sendPhoneVerificationOtp(user.id, dto, ip);
+   }
+
+   @Post('phone/verify')
+   @UseGuards(JwtAuthGuard)
+   verifyPhone(@CurrentUser() user, @Body() dto: VerifyPhoneOtpDto, @Ip() ip) {
+     return this.authService.verifyPhoneOtp(user.id, dto, ip);
+   }
 }

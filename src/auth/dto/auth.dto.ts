@@ -7,6 +7,7 @@ import {
   IsPhoneNumber,
   Matches,
   IsNotEmpty,
+  Length,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 
@@ -193,3 +194,16 @@ export class ResetPinDto {
   @Matches(/^\d{4}$/, { message: 'PIN must be 4 numeric digits only' })
   pin: string;
 }
+
+export class SendPhoneOtpDto {
+     @IsOptional()
+     @IsString()
+     @Matches(/^\+?[1-9]\d{1,14}$/, { message: 'Invalid phone number format' })
+     phone?: string;
+   }
+
+   export class VerifyPhoneOtpDto {
+     @IsString()
+     @Length(6, 6)
+     otp: string;
+   }

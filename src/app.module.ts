@@ -14,6 +14,7 @@ import { KafkaModule } from './kafka/kafka.module';
 import { QueueModule } from './queue/queue.module';
 import { FlutterwaveModule } from './flutterwave/flutterwave.module';
 import { EmailModule } from './email/email.module';
+import { WhatsappModule } from './whatsapp/whatsapp.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { EmailModule } from './email/email.module';
     WalletModule,
     InvoiceModule,
     EmailModule,
+    WhatsappModule,
   ],
   controllers: [],
   providers: [],

@@ -16,6 +16,7 @@ import * as speakeasy from 'speakeasy';
 import * as qrcode from 'qrcode';
 import { nanoid } from 'nanoid';
 
+import { WhatsappOtpService } from '../whatsapp/whatsapp-otp.service';
 import { User } from '../entities/user.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { Notification } from '../entities/notification.entity';
@@ -43,6 +44,10 @@ import {
   VerifyEmailOtpDto,
   SwitchToAuthenticatorDto,
   SwitchToEmailDto,
+  // ── NEW ──────────────────────────────────────────────────────────────────────
+  // Add these two DTOs to your auth.dto.ts (shown at the bottom of this file)
+  SendPhoneOtpDto,
+  VerifyPhoneOtpDto,
 } from './dto/auth.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 
@@ -77,12 +82,22 @@ export class AuthService {
     @InjectRepository(Notification)
     private notifRepo: Repository<Notification>,
 
+    private whatsappOtp: WhatsappOtpService,
     private jwtService: JwtService,
     private config: ConfigService,
     private emailService: EmailService,
   ) {}
 
   // ── REGISTER ──────────────────────────────────────────────────────────────────
+  // Phone is now collected at registration and stored unverified.
+  // isPhoneVerified stays false until the user completes the
+  // POST /auth/phone/verify flow.
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ── REGISTER ──────────────────────────────────────────────────────────────────
+  // Change: pass throwOnRateLimit=false so a slow/rate-limited WhatsApp send
+  // never aborts registration.  Rate-limit for the resend flow is enforced
+  // inside WhatsappOtpService itself.
+  // ─────────────────────────────────────────────────────────────────────────────
   async register(dto: RegisterDto, ipAddress?: string) {
     const existing = await this.userRepo.findOne({
       where: { email: dto.email },
@@ -90,6 +105,18 @@ export class AuthService {
     });
     if (existing) {
       throw new ConflictException('An account with this email already exists');
+    }
+
+    if (dto.phone) {
+      const phoneTaken = await this.userRepo.findOne({
+        where: { phone: dto.phone },
+        withDeleted: true,
+      });
+      if (phoneTaken) {
+        throw new ConflictException(
+          'An account with this phone number already exists',
+        );
+      }
     }
 
     let referredBy: User | null = null;
@@ -114,14 +141,13 @@ export class AuthService {
       passwordHash,
       firstName: dto.firstName,
       lastName: dto.lastName,
+      phone: dto.phone ?? null,
+      isPhoneVerified: false,
       referralCode,
       referredById: referredBy?.id ?? null,
       role: UserRole.USER,
       kycStatus: KycStatus.PENDING,
       twoFaEnabled: true,
-      // New users always start on EMAIL 2FA.
-      // twoFaMethod only changes to AUTHENTICATOR after the user completes
-      // the full setup + confirm flow in /auth/2fa/authenticator/confirm.
       twoFaMethod: TwoFaMethod.EMAIL,
     });
 
@@ -130,7 +156,6 @@ export class AuthService {
     const verifyToken = await this.createEmailVerifyToken(user.id);
     const verifyLink = `${this.config.get('APP_URL')}/auth/verify-email?token=${verifyToken}`;
 
-    // In-app notification
     await this.notifRepo.save(
       this.notifRepo.create({
         userId: user.id,
@@ -142,8 +167,7 @@ export class AuthService {
       }),
     );
 
-    // Welcome email + verification email fired in parallel
-    await Promise.allSettled([
+    const parallelTasks: Promise<any>[] = [
       this.emailService.sendWelcome(user.email, {
         firstName: user.firstName,
         email: user.email,
@@ -152,7 +176,16 @@ export class AuthService {
         firstName: user.firstName,
         otp: verifyLink,
       }),
-    ]);
+    ];
+
+    if (user.phone) {
+      // throwOnRateLimit=false: a rate-limit hit must not abort registration
+      parallelTasks.push(
+        this.whatsappOtp.sendOtp(user.phone, user.firstName, false),
+      );
+    }
+
+    await Promise.allSettled(parallelTasks);
 
     await this.saveAudit(
       user.id,
@@ -167,10 +200,125 @@ export class AuthService {
 
     const tokens = await this.generateTokens(user);
     return {
-      message: 'Registration successful. Please verify your email.',
+      message: user.phone
+        ? 'Registration successful. Please verify your email and phone number.'
+        : 'Registration successful. Please verify your email.',
       user: this.sanitizeUser(user),
       ...tokens,
     };
+  }
+
+  // ── SEND PHONE VERIFICATION OTP ───────────────────────────────────────────────
+  // Change: removed the in-memory phoneOtpRateLimit Map — rate-limiting is now
+  // fully inside WhatsappOtpService (Redis-backed, multi-instance safe).
+  // ─────────────────────────────────────────────────────────────────────────────
+  async sendPhoneVerificationOtp(
+    userId: string,
+    dto: SendPhoneOtpDto,
+    ipAddress?: string,
+  ): Promise<{ message: string }> {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['id', 'firstName', 'phone', 'isPhoneVerified'],
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const phone = user.phone ?? dto.phone;
+    if (!phone) {
+      throw new BadRequestException(
+        'No phone number on file. Provide one in the request body.',
+      );
+    }
+
+    if (user.isPhoneVerified) {
+      throw new BadRequestException('Phone number is already verified');
+    }
+
+    if (!user.phone || user.phone !== phone) {
+      const phoneTaken = await this.userRepo.findOne({
+        where: { phone },
+        withDeleted: true,
+      });
+      if (phoneTaken && phoneTaken.id !== userId) {
+        throw new ConflictException(
+          'An account with this phone number already exists',
+        );
+      }
+      await this.userRepo.update(userId, { phone });
+    }
+
+    // Rate-limit is enforced inside sendOtp (throwOnRateLimit=true by default).
+    // BadRequestException bubbles up naturally if the user is too fast.
+    await this.whatsappOtp.sendOtp(phone, user.firstName);
+
+    await this.saveAudit(
+      userId,
+      AuditActorType.USER,
+      'user.phone_otp_sent',
+      'users',
+      userId,
+      null,
+      { phone },
+      ipAddress,
+    );
+
+    return { message: 'OTP sent to your WhatsApp number' };
+  }
+
+  // ── VERIFY PHONE OTP ──────────────────────────────────────────────────────────
+  // Unchanged in logic; phoneOtpRateLimit.delete() call removed because the
+  // rate-limit key is now managed by WhatsappOtpService in Redis.
+  // ─────────────────────────────────────────────────────────────────────────────
+  async verifyPhoneOtp(
+    userId: string,
+    dto: VerifyPhoneOtpDto,
+    ipAddress?: string,
+  ): Promise<{ message: string }> {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['id', 'phone', 'isPhoneVerified'],
+    });
+    if (!user) throw new NotFoundException('User not found');
+    if (user.isPhoneVerified) {
+      return { message: 'Phone number is already verified' };
+    }
+    if (!user.phone) {
+      throw new BadRequestException(
+        'No phone number on file. Call send-otp first.',
+      );
+    }
+
+    const result = await this.whatsappOtp.verifyOtp(user.phone, dto.otp);
+    if (!result.valid) {
+      throw new BadRequestException(result.reason ?? 'Invalid OTP');
+    }
+
+    await this.userRepo.update(userId, { isPhoneVerified: true });
+    // No phoneOtpRateLimit.delete() — rate-limit lives in Redis now
+
+    await this.notifRepo.save(
+      this.notifRepo.create({
+        userId,
+        type: NotificationType.PAYMENT_WAITING,
+        channel: NotificationChannel.IN_APP,
+        title: 'Phone number verified',
+        body: 'Your WhatsApp number has been verified successfully.',
+        data: {},
+      }),
+    );
+
+    await this.saveAudit(
+      userId,
+      AuditActorType.USER,
+      'user.phone_verified',
+      'users',
+      userId,
+      null,
+      { phone: user.phone },
+      ipAddress,
+    );
+
+    return { message: 'Phone number verified successfully' };
   }
 
   // ── LOGIN ─────────────────────────────────────────────────────────────────────
