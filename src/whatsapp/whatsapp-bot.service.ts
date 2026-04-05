@@ -6,7 +6,6 @@ import Redis from 'ioredis';
 
 import { GupshupService } from './gupshup.service';
 import { WhatsappSessionService, BotState } from './whatsapp-session.service';
-import { WhatsappOtpService } from './whatsapp-otp.service';
 import { WalletService } from '../wallet/wallet.service';
 import { InvoiceService } from '../invoice/invoice.service';
 import { EmailService } from '../email/email.service';
@@ -31,7 +30,6 @@ export class WhatsappBotService {
     private walletSvc: WalletService,
     private invoiceSvc: InvoiceService,
     private emailSvc: EmailService,
-    private waOtpService: WhatsappOtpService,
     private dataSource: DataSource,
 
     @Inject(REDIS_CLIENT)
@@ -83,9 +81,7 @@ export class WhatsappBotService {
         }
         break;
 
-      case BotState.AWAITING_OTP:
-        await this.handleOtpInput(phone, text, s);
-        break;
+      // ── REMOVED: BotState.AWAITING_OTP — OTP is app-only ────────────────────
 
       case BotState.AWAITING_PIN:
         await this.handlePinInput(phone, text, user!, s);
@@ -178,68 +174,39 @@ export class WhatsappBotService {
     return false;
   }
 
-  // ── FIX 1: MISSING handleOtpInput ────────────────────────────────────────────
-  // Called when user is in AWAITING_OTP state (phone verification during signup)
-  private async handleOtpInput(
-    phone: string,
-    text: string,
-    s: any,
-  ): Promise<void> {
-    const otp = text.trim();
-
-    if (!/^\d{6}$/.test(otp)) {
-      await this.gupshup.sendText(
-        phone,
-        `❌ Invalid OTP format. Please enter the 6-digit code sent to your WhatsApp.\n\n` +
-          `Send *cancel* to abort.`,
-      );
-      return;
-    }
-
-    const result = await this.waOtpService.verifyOtp(phone, otp);
-
-    if (!result.valid) {
-      const attempts = await this.session.incrementAttempts(phone);
-
-      if (attempts >= 3) {
-        await this.session.clear(phone);
-        await this.gupshup.sendText(
-          phone,
-          `🔒 Too many incorrect attempts. Session ended.\n\n` +
-            `Please request a new OTP from the app.`,
-        );
-        return;
-      }
-
-      await this.gupshup.sendText(phone, `❌ ${result.reason}`);
-      return;
-    }
-
-    // OTP verified — update user phone verification status
-    const normalizedPhone = this.normalizePhone(phone);
-    await this.userRepo.update(
-      { phone: normalizedPhone },
-      { isPhoneVerified: true },
-    );
-
-    await this.session.clear(phone);
-
-    await this.gupshup.sendText(
-      phone,
-      `✅ *Phone number verified successfully!*\n\n` +
-        `Your WhatsApp is now linked to your CryptoPay NG account.\n\n` +
-        `Send *menu* to see what you can do.`,
-    );
-
-    this.logger.log(`Phone verified via WhatsApp OTP: ${phone}`);
-  }
-
-  // ── UNREGISTERED MENU ─────────────────────────────────────────────────────────
+  // ── UNREGISTERED / UNVERIFIED MENU ───────────────────────────────────────────
+  // Detects three states:
+  //   1. Phone exists in DB but not yet verified → tell them to verify in the app
+  //   2. Phone not in DB at all                  → show signup link
+  // No OTP is collected here — verification is app-only.
+  // ─────────────────────────────────────────────────────────────────────────────
   private async showUnregisteredMenu(
     phone: string,
     name?: string,
   ): Promise<void> {
     const greeting = name ? `Hi *${name}*! 👋` : 'Hello! 👋';
+    const normalizedPhone = this.normalizePhone(phone);
+
+    // Check if there's an account with this phone that isn't verified yet
+    const unverifiedUser = await this.userRepo.findOne({
+      where: { phone: normalizedPhone, isPhoneVerified: false },
+      select: ['id', 'firstName', 'isPhoneVerified'],
+    });
+
+    if (unverifiedUser) {
+      await this.gupshup.sendText(
+        phone,
+        `${greeting}\n\n` +
+          `We found a *CryptoPay NG* account linked to this number, but your ` +
+          `WhatsApp hasn't been verified yet.\n\n` +
+          `📱 To verify your number, open the app and go to:\n` +
+          `*Settings → Phone Verification*\n\n` +
+          `Once verified, you'll have full access to the bot.`,
+      );
+      return;
+    }
+
+    // No account at all
     await this.gupshup.sendText(
       phone,
       `${greeting}\n\n` +
@@ -252,14 +219,28 @@ export class WhatsappBotService {
   }
 
   // ── MAIN MENU ─────────────────────────────────────────────────────────────────
+  // Guard: if the found user's phone isn't verified yet, block bot access and
+  // redirect them to the app — even if they somehow reach showMainMenu.
+  // ─────────────────────────────────────────────────────────────────────────────
   private async showMainMenu(phone: string, user: User): Promise<void> {
+    if (!user.isPhoneVerified) {
+      await this.gupshup.sendText(
+        phone,
+        `⚠️ *Phone not verified*\n\n` +
+          `Your WhatsApp number isn't verified yet.\n\n` +
+          `📱 Please open the app and go to:\n` +
+          `*Settings → Phone Verification*\n\n` +
+          `Once done, send *menu* to continue.`,
+      );
+      return;
+    }
+
     const walletData = await this.walletSvc.getMyWallet(user.id);
     const summary = await this.walletSvc.getWalletSummary(user.id);
     const balance = Number(summary.availableBalance).toLocaleString('en-NG', {
       minimumFractionDigits: 2,
     });
 
-    // FIX 2: use 'to' not 'phone'
     await this.gupshup.sendList({
       to: phone,
       header: `💰 CryptoPay NG`,
@@ -842,7 +823,6 @@ export class WhatsappBotService {
       title: text,
     });
 
-    // FIX 3: use 'to' not 'phone'
     await this.gupshup.sendQuickReply({
       to: phone,
       header: '📄 Confirm Invoice',
