@@ -5,6 +5,7 @@ import {
   NotFoundException,
   ConflictException,
   ForbiddenException,
+  Inject,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -44,31 +45,12 @@ import {
   VerifyEmailOtpDto,
   SwitchToAuthenticatorDto,
   SwitchToEmailDto,
-  // ── NEW ──────────────────────────────────────────────────────────────────────
-  // Add these two DTOs to your auth.dto.ts (shown at the bottom of this file)
   SendPhoneOtpDto,
   VerifyPhoneOtpDto,
 } from './dto/auth.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
-
-// NOTE: Replace with Redis before production
-const passwordResetTokens = new Map<
-  string,
-  { userId: string; expiresAt: Date }
->();
-const emailVerifyTokens = new Map<
-  string,
-  { userId: string; expiresAt: Date }
->();
-const refreshTokenStore = new Map<
-  string,
-  { userId: string; expiresAt: Date }
->();
-const pinResetTokens = new Map<string, { userId: string; expiresAt: Date }>();
-const pendingTwoFaStore = new Map<
-  string,
-  { userId: string; expiresAt: Date }
->();
+import { REDIS_CLIENT } from '../redis/redis.module';
+import Redis from 'ioredis';
 
 @Injectable()
 export class AuthService {
@@ -82,22 +64,50 @@ export class AuthService {
     @InjectRepository(Notification)
     private notifRepo: Repository<Notification>,
 
+    @Inject(REDIS_CLIENT) private redis: Redis,
+
     private whatsappOtp: WhatsappOtpService,
     private jwtService: JwtService,
     private config: ConfigService,
     private emailService: EmailService,
   ) {}
 
+  // ── REDIS KEY HELPERS ─────────────────────────────────────────────────────────
+  private rk = {
+    passwordReset: (t: string) => `auth:pwd-reset:${t}`,
+    emailVerify: (t: string) => `auth:email-verify:${t}`,
+    refresh: (t: string) => `auth:refresh:${t}`,
+    pinReset: (t: string) => `auth:pin-reset:${t}`,
+    pending2fa: (t: string) => `auth:pending-2fa:${t}`,
+  } as const;
+
+  // TTLs in seconds
+  private ttl = {
+    passwordReset: 15 * 60, // 15 min
+    emailVerify: 24 * 60 * 60, // 24 h
+    refresh: 7 * 24 * 60 * 60, // 7 d
+    pinReset: 15 * 60, // 15 min
+    pending2fa: 10 * 60, // 10 min
+  } as const;
+
+  // Generic typed get/set/del helpers
+  private async redisSet(key: string, userId: string, ttlSeconds: number) {
+    await this.redis.setex(key, ttlSeconds, userId);
+  }
+
+  private async redisGet(key: string): Promise<string | null> {
+    return this.redis.get(key);
+  }
+
+  private async redisDel(key: string) {
+    await this.redis.del(key);
+  }
   // ── REGISTER ──────────────────────────────────────────────────────────────────
   // Phone is now collected at registration and stored unverified.
   // isPhoneVerified stays false until the user completes the
   // POST /auth/phone/verify flow.
   // ─────────────────────────────────────────────────────────────────────────────
-  // ── REGISTER ──────────────────────────────────────────────────────────────────
-  // Change: pass throwOnRateLimit=false so a slow/rate-limited WhatsApp send
-  // never aborts registration.  Rate-limit for the resend flow is enforced
-  // inside WhatsappOtpService itself.
-  // ─────────────────────────────────────────────────────────────────────────────
+
   async register(dto: RegisterDto, ipAddress?: string) {
     const existing = await this.userRepo.findOne({
       where: { email: dto.email },
@@ -299,7 +309,7 @@ export class AuthService {
     await this.notifRepo.save(
       this.notifRepo.create({
         userId,
-        type: NotificationType.PAYMENT_WAITING,
+        type: NotificationType.PHONE_VERIFICATION,
         channel: NotificationChannel.IN_APP,
         title: 'Phone number verified',
         body: 'Your WhatsApp number has been verified successfully.',
@@ -382,10 +392,11 @@ export class AuthService {
         // the TOTP on the /auth/login/verify-otp endpoint.
 
         const tempToken = crypto.randomBytes(32).toString('hex');
-        pendingTwoFaStore.set(tempToken, {
-          userId: user.id,
-          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-        });
+        await this.redisSet(
+          this.rk.pending2fa(tempToken),
+          user.id,
+          this.ttl.pending2fa,
+        );
 
         return {
           requiresOtp: true,
@@ -429,13 +440,13 @@ export class AuthService {
     dto: VerifyEmailOtpDto,
     ipAddress?: string,
   ) {
-    const pending = pendingTwoFaStore.get(tempToken);
-    if (!pending || pending.expiresAt < new Date()) {
+    const pendingUserId = await this.redisGet(this.rk.pending2fa(tempToken));
+    if (!pendingUserId) {
       throw new UnauthorizedException('Session expired. Please log in again.');
     }
 
     const user = await this.userRepo.findOne({
-      where: { id: pending.userId },
+      where: { id: pendingUserId },
       select: [
         'id',
         'email',
@@ -460,7 +471,7 @@ export class AuthService {
     // validateOtpCode already branches on twoFaMethod — EMAIL checks the
     // stored OTP, AUTHENTICATOR runs speakeasy.totp.verify.
     await this.validateOtpCode(user, dto.otp);
-    pendingTwoFaStore.delete(tempToken);
+    await this.redisDel(this.rk.pending2fa(tempToken));
 
     await this.userRepo.update(user.id, { lastLoginAt: new Date() });
     await this.saveAudit(
@@ -484,13 +495,12 @@ export class AuthService {
 
   // ── RESEND LOGIN OTP ──────────────────────────────────────────────────────────
   async resendLoginOtp(tempToken: string, ipAddress?: string) {
-    const pending = pendingTwoFaStore.get(tempToken);
-    if (!pending || pending.expiresAt < new Date()) {
+    const pendingUserId = await this.redisGet(this.rk.pending2fa(tempToken));
+    if (!pendingUserId) {
       throw new UnauthorizedException('Session expired. Please log in again.');
     }
-
     const user = await this.userRepo.findOne({
-      where: { id: pending.userId },
+      where: { id: pendingUserId },
       select: ['id', 'email', 'firstName', 'twoFaMethod'],
     });
 
@@ -519,12 +529,10 @@ export class AuthService {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
 
-    const stored = refreshTokenStore.get(dto.refreshToken);
-    if (
-      !stored ||
-      stored.userId !== payload.sub ||
-      stored.expiresAt < new Date()
-    ) {
+    const storedUserId = await this.redis.get(
+      `auth:refresh:${dto.refreshToken}`,
+    );
+    if (!storedUserId || storedUserId !== payload.sub) {
       throw new UnauthorizedException('Refresh token revoked or expired');
     }
 
@@ -532,13 +540,13 @@ export class AuthService {
     if (!user || !user.isActive)
       throw new UnauthorizedException('User not found');
 
-    refreshTokenStore.delete(dto.refreshToken);
+    await this.redis.del(`auth:refresh:${dto.refreshToken}`);
     return this.generateTokens(user);
   }
 
   // ── LOGOUT ────────────────────────────────────────────────────────────────────
   async logout(refreshToken: string, userId: string) {
-    refreshTokenStore.delete(refreshToken);
+    await this.redisDel(this.rk.refresh(refreshToken)); // revoke token
     await this.saveAudit(
       userId,
       AuditActorType.USER,
@@ -551,19 +559,18 @@ export class AuthService {
 
   // ── VERIFY EMAIL ──────────────────────────────────────────────────────────────
   async verifyEmail(token: string) {
-    const record = emailVerifyTokens.get(token);
-    if (!record || record.expiresAt < new Date()) {
+    const userId = await this.redisGet(this.rk.emailVerify(token));
+    if (!userId) {
       throw new BadRequestException(
         'Verification link is invalid or has expired',
       );
     }
-
-    const user = await this.userRepo.findOne({ where: { id: record.userId } });
+    const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
     if (user.isEmailVerified) return { message: 'Email already verified' };
 
     await this.userRepo.update(user.id, { isEmailVerified: true });
-    emailVerifyTokens.delete(token);
+    await this.redisDel(this.rk.emailVerify(token)); // consume token
     await this.saveAudit(
       user.id,
       AuditActorType.USER,
@@ -618,10 +625,11 @@ export class AuthService {
     const token = crypto.randomBytes(32).toString('hex');
     const resetLink = `${this.config.get('APP_URL')}/auth/reset-password?token=${token}`;
 
-    passwordResetTokens.set(token, {
-      userId: user.id,
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-    });
+    await this.redisSet(
+      this.rk.passwordReset(token),
+      user.id,
+      this.ttl.passwordReset,
+    );
 
     await this.notifRepo.save(
       this.notifRepo.create({
@@ -651,12 +659,11 @@ export class AuthService {
 
   // ── RESET PASSWORD ────────────────────────────────────────────────────────────
   async resetPassword(dto: ResetPasswordDto) {
-    const record = passwordResetTokens.get(dto.token);
-    if (!record || record.expiresAt < new Date()) {
+    const userId = await this.redisGet(this.rk.passwordReset(dto.token));
+    if (!userId) {
       throw new BadRequestException('Reset link is invalid or has expired');
     }
-
-    const user = await this.userRepo.findOne({ where: { id: record.userId } });
+    const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
 
     const passwordHash = await argon2.hash(dto.password, {
@@ -667,11 +674,10 @@ export class AuthService {
     });
 
     await this.userRepo.update(user.id, { passwordHash });
-    passwordResetTokens.delete(dto.token);
+    await this.redisDel(this.rk.passwordReset(dto.token)); // consume token
 
-    for (const [key, val] of refreshTokenStore.entries()) {
-      if (val.userId === user.id) refreshTokenStore.delete(key);
-    }
+    // Invalidate all refresh tokens for this user via key scan
+    await this.revokeAllRefreshTokens(user.id);
 
     await this.saveAudit(
       user.id,
@@ -681,6 +687,28 @@ export class AuthService {
       user.id,
     );
     return { message: 'Password reset successful. Please log in.' };
+  }
+
+  // New helper — scans only the auth:refresh:* namespace (bounded scan)
+  private async revokeAllRefreshTokens(userId: string): Promise<void> {
+    let cursor = '0';
+    do {
+      const [next, keys] = await this.redis.scan(
+        cursor,
+        'MATCH',
+        'auth:refresh:*',
+        'COUNT',
+        100,
+      );
+      cursor = next;
+
+      if (keys.length === 0) continue;
+
+      // Fetch all values in one round-trip; drop keys that belong to this user
+      const values = await this.redis.mget(...keys);
+      const toDelete = keys.filter((_, i) => values[i] === userId);
+      if (toDelete.length) await this.redis.del(...toDelete);
+    } while (cursor !== '0');
   }
 
   // ── CHANGE PASSWORD ───────────────────────────────────────────────────────────
@@ -954,10 +982,7 @@ export class AuthService {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const token = crypto.randomBytes(32).toString('hex');
 
-    pinResetTokens.set(token, {
-      userId: user.id,
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-    });
+    await this.redisSet(this.rk.pinReset(token), user.id, this.ttl.pinReset);
 
     await this.notifRepo.save(
       this.notifRepo.create({
@@ -987,12 +1012,11 @@ export class AuthService {
 
   // ── PIN: RESET ────────────────────────────────────────────────────────────────
   async resetPin(dto: ResetPinDto) {
-    const record = pinResetTokens.get(dto.token);
-    if (!record || record.expiresAt < new Date()) {
+    const userId = await this.redisGet(this.rk.pinReset(dto.token));
+    if (!userId) {
       throw new BadRequestException('PIN reset link is invalid or has expired');
     }
-
-    const user = await this.userRepo.findOne({ where: { id: record.userId } });
+    const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
 
     const pinHash = await argon2.hash(dto.pin, {
@@ -1003,7 +1027,7 @@ export class AuthService {
     });
 
     await this.userRepo.update(user.id, { pinHash, isPinSet: true });
-    pinResetTokens.delete(dto.token);
+    await this.redisDel(this.rk.pinReset(dto.token)); // consume token
 
     await this.saveAudit(
       user.id,
@@ -1162,10 +1186,11 @@ export class AuthService {
       }),
     ]);
 
-    refreshTokenStore.set(refreshToken, {
-      userId: user.id,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-    });
+    await this.redis.setex(
+      `auth:refresh:${refreshToken}`,
+      7 * 24 * 60 * 60,
+      user.id,
+    );
 
     return { accessToken, refreshToken };
   }
@@ -1182,10 +1207,11 @@ export class AuthService {
 
   private async createEmailVerifyToken(userId: string): Promise<string> {
     const token = crypto.randomBytes(32).toString('hex');
-    emailVerifyTokens.set(token, {
+    await this.redisSet(
+      this.rk.emailVerify(token),
       userId,
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-    });
+      this.ttl.emailVerify,
+    );
     return token;
   }
 

@@ -1195,7 +1195,7 @@ export class NowpaymentsService {
     // Try each provider in order — first success wins
     const providers = [
       () => this.getRateFromExchangeRateApi(),
-      () => this.getRateFromCoinbase(),
+      () => this.getRateFromCoinPaprika(),
     ];
 
     for (const provider of providers) {
@@ -1207,7 +1207,7 @@ export class NowpaymentsService {
         }
       } catch (err) {
         this.logger.warn(
-          `Rate provider [Coinbase] failed: ${err.message ?? err.code ?? 'unknown error'}`,
+          `Rate provider failed: ${err.message ?? err.code ?? 'unknown error'}`,
         );
       }
     }
@@ -1228,32 +1228,6 @@ export class NowpaymentsService {
     );
   }
 
-  // ── Provider 1: Coinbase (no API key needed for spot prices) ──────────────────
-  private async getRateFromCoinbase(): Promise<number> {
-    try {
-      const res = await axios.get(
-        'https://api.coinbase.com/v2/exchange-rates?currency=USD',
-        { timeout: 8000 },
-      );
-
-      const ngnRate = res.data?.data?.rates?.NGN;
-      if (!ngnRate) throw new Error('NGN rate not found in Coinbase response');
-
-      const rate = Number(ngnRate);
-      this.logger.debug(`Coinbase USD/NGN: ${rate}`);
-      return rate;
-    } catch (err) {
-      // Rethrow with detail so the caller logs it properly
-      const reason = err.response?.status
-        ? `HTTP ${err.response.status} — ${err.response?.data?.message ?? 'no detail'}`
-        : err.code
-          ? `Network error: ${err.code}`
-          : err.message || 'Unknown error';
-
-      throw new Error(`Coinbase: ${reason}`);
-    }
-  }
-
   // ── Provider 2: ExchangeRate-API (free tier, 1500 req/month) ──────────────────
   private async getRateFromExchangeRateApi(): Promise<number> {
     const apiKey = this.config.get<string>('EXCHANGE_RATE_API_KEY');
@@ -1268,6 +1242,38 @@ export class NowpaymentsService {
 
     this.logger.debug(`ExchangeRate-API USD/NGN: ${rate}`);
     return Number(rate);
+  }
+
+  private async getRateFromCoinPaprika(): Promise<number> {
+    try {
+      const res = await axios.get(
+        'https://api.coinpaprika.com/v1/price-converter',
+        {
+          params: {
+            base_currency_id: 'usd-us-dollars',
+            quote_currency_id: 'ngn-nigerian-naira',
+            amount: 1,
+          },
+          timeout: 8000,
+        },
+      );
+
+      const rate = res.data?.price;
+      if (!rate || isNaN(Number(rate))) {
+        throw new Error('NGN rate not found in CoinPaprika response');
+      }
+
+      this.logger.debug(`CoinPaprika USD/NGN: ${rate}`);
+      return Number(rate);
+    } catch (err) {
+      const reason = err.response?.status
+        ? `HTTP ${err.response.status} — ${err.response?.data?.error ?? 'no detail'}`
+        : err.code
+          ? `Network error: ${err.code}`
+          : err.message || 'Unknown error';
+
+      throw new Error(`CoinPaprika: ${reason}`);
+    }
   }
 
   // ── HELPER: SORT OBJECT KEYS (for NowPayments signature) ─────────────────────

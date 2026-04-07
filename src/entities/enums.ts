@@ -69,6 +69,7 @@ export enum NotificationType {
   PAYMENT_CONFIRMING = 'payment_confirming',
   PAYOUT_FAILED = 'payout_failed',
   INVOICE_EXPIRED = 'invoice_expired',
+  PHONE_VERIFICATION = 'phone_verification',
 }
 
 export enum NotificationChannel {
