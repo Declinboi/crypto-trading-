@@ -48,8 +48,8 @@ export class User {
   @Column({ type: 'text', name: 'verified_name', nullable: true })
   verifiedName: string | null; // stored as AES-256-GCM ciphertext
 
-  @Column({ type: 'text', name: 'avatar_url', nullable: true })
-  avatarUrl: string | null;
+  // @Column({ type: 'text', name: 'avatar_url', nullable: true })
+  // avatarUrl: string | null;
 
   @Column({ type: 'enum', enum: UserRole, default: UserRole.USER })
   role: UserRole;

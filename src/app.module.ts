@@ -15,6 +15,7 @@ import { QueueModule } from './queue/queue.module';
 import { FlutterwaveModule } from './flutterwave/flutterwave.module';
 import { EmailModule } from './email/email.module';
 import { WhatsappModule } from './whatsapp/whatsapp.module';
+import { EncryptionModule } from './encryption/encryption.module';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { WhatsappModule } from './whatsapp/whatsapp.module';
     InvoiceModule,
     EmailModule,
     WhatsappModule,
+    EncryptionModule
   ],
   controllers: [],
   providers: [],
