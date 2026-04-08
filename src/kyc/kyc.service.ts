@@ -71,8 +71,9 @@ export class KycService {
   }
 
   // ── STEP 1: VERIFY BVN ────────────────────────────────────────────────────────
-  // User submits their BVN — we verify it against Smile Identity database
-  // Returns the name associated with the BVN for confirmation
+  // User submits their BVN — we verify it against Smile Identity database.
+  // The name returned here is the authoritative verified name for this user.
+  // It will be used to overwrite the user's profile in Step 2 (NIN + face).
   async verifyBvn(
     userId: string,
     dto: InitiateBvnDto,
@@ -89,7 +90,7 @@ export class KycService {
       throw new BadRequestException('Your identity is already verified');
     }
 
-    // Hash BVN before storing
+    // Hash BVN before storing — never persist the raw BVN
     const bvnHash = crypto
       .createHash('sha256')
       .update(dto.bvn.trim())
@@ -136,11 +137,33 @@ export class KycService {
       );
     }
 
+    // Derive clean first/last name from the Smile Identity result.
+    // extractVerifiedName normalises single-word names and trims whitespace.
+    const { firstName, lastName, fullName } = this.extractVerifiedName(
+      result.fullName,
+      result.firstName,
+      result.lastName,
+    );
+
     // Save/update KYC record with BVN data
     const existing = await this.kycRepo.findOne({
       where: { userId },
       order: { createdAt: 'DESC' },
     });
+
+    const bvnMeta = {
+      bvnVerified: true,
+      bvnJobId: result.jobId,
+      smileJobId: result.smileJobId,
+      // Store the normalised names — these are the source of truth for
+      // every downstream name update (NIN step, webhook path, admin review)
+      fullName,
+      firstName,
+      lastName,
+      dateOfBirth: result.dateOfBirth,
+      gender: result.gender,
+      verifiedAt: new Date().toISOString(),
+    };
 
     if (existing) {
       await this.updateKyc(existing.id, {
@@ -149,17 +172,7 @@ export class KycService {
         status: KycStatus.SUBMITTED,
         provider: 'smile_identity',
         providerRef: result.jobId,
-        metadata: {
-          bvnVerified: true,
-          bvnJobId: result.jobId,
-          smileJobId: result.smileJobId,
-          fullName: result.fullName,
-          firstName: result.firstName,
-          lastName: result.lastName,
-          dateOfBirth: result.dateOfBirth,
-          gender: result.gender,
-          verifiedAt: new Date().toISOString(),
-        },
+        metadata: bvnMeta,
       });
     } else {
       await this.kycRepo.save(
@@ -170,17 +183,7 @@ export class KycService {
           status: KycStatus.SUBMITTED,
           provider: 'smile_identity',
           providerRef: result.jobId,
-          metadata: {
-            bvnVerified: true,
-            bvnJobId: result.jobId,
-            smileJobId: result.smileJobId,
-            fullName: result.fullName,
-            firstName: result.firstName,
-            lastName: result.lastName,
-            dateOfBirth: result.dateOfBirth,
-            gender: result.gender,
-            verifiedAt: new Date().toISOString(),
-          },
+          metadata: bvnMeta,
         }),
       );
     }
@@ -196,12 +199,12 @@ export class KycService {
     );
 
     this.logger.log(
-      `BVN verified for userId=${userId} jobId=${result.jobId} name="${result.fullName}"`,
+      `BVN verified for userId=${userId} jobId=${result.jobId} name="${fullName}"`,
     );
 
     return {
       verified: true,
-      fullName: result.fullName,
+      fullName,
       jobId: result.jobId,
       message: 'BVN verified successfully. Please proceed to NIN verification.',
     };
@@ -209,8 +212,9 @@ export class KycService {
 
   // ── STEP 2: VERIFY NIN + FACE ─────────────────────────────────────────────────
   // User submits NIN + selfie — we verify NIN and compare face against it.
-  // On success: user profile is updated with the BVN-verified name (already
-  // confirmed in Step 1) — NOT the name returned from the NIN result.
+  // On success: user profile (firstName, lastName, verifiedName) is replaced
+  // with the BVN-verified name captured in Step 1. The NIN result name is
+  // intentionally ignored to avoid inconsistency.
   async verifyNinWithFace(
     userId: string,
     dto: SubmitKycWithFaceDto,
@@ -226,7 +230,7 @@ export class KycService {
       throw new BadRequestException('Your identity is already verified');
     }
 
-    // Check BVN was verified first
+    // Ensure BVN step was completed first
     const kycRecord = await this.kycRepo.findOne({
       where: { userId },
       order: { createdAt: 'DESC' },
@@ -239,7 +243,7 @@ export class KycService {
       );
     }
 
-    // Hash NIN before storing
+    // Hash NIN before storing — never persist the raw NIN
     const ninHash = crypto
       .createHash('sha256')
       .update(dto.idNumber.trim())
@@ -280,20 +284,18 @@ export class KycService {
       dateOfBirth: dto.dateOfBirth,
     });
 
-    // ── Handle verification result ─────────────────────────────────────────────
+    // ── Handle verification failures ──────────────────────────────────────────
+
     if (!result.idVerified) {
       await this.updateKyc(kycRecord!.id, {
         status: KycStatus.REJECTED,
         rejectionReason: `ID verification failed: ${result.resultText}`,
       });
-
       await this.userRepo.update(userId, { kycStatus: KycStatus.REJECTED });
-
       await this.sendKycRejectedNotifications(
         user,
         `ID verification failed: ${result.resultText}`,
       );
-
       throw new BadRequestException(
         `NIN verification failed: ${result.resultText}. Please check your NIN and try again.`,
       );
@@ -305,14 +307,11 @@ export class KycService {
         rejectionReason:
           'Face does not match the ID. Please ensure your selfie is clear.',
       });
-
       await this.userRepo.update(userId, { kycStatus: KycStatus.REJECTED });
-
       await this.sendKycRejectedNotifications(
         user,
         'Your selfie did not match the photo on your ID document.',
       );
-
       throw new BadRequestException(
         'Face verification failed. Your selfie does not match your ID. Please try again with a clearer photo.',
       );
@@ -324,38 +323,28 @@ export class KycService {
         rejectionReason:
           'Liveness check failed. Possible use of photo or video.',
       });
-
       await this.userRepo.update(userId, { kycStatus: KycStatus.REJECTED });
-
       await this.sendKycRejectedNotifications(
         user,
         'Liveness check failed. Please take a live selfie (not a photo of a photo).',
       );
-
       throw new BadRequestException(
         'Liveness check failed. Please ensure you are taking a live selfie.',
       );
     }
 
-    // ── ALL CHECKS PASSED — Use verified name from BVN step ──────────────────
-    // Name was already verified and captured during BVN verification (Step 1),
-    // so we source it from the existing KYC record metadata rather than
-    // overwriting it with whatever the NIN result returns.
-    const bvnMeta = kycRecord!.metadata as any;
-    const verifiedFirstName = bvnMeta?.firstName ?? user.firstName;
-    const verifiedLastName = bvnMeta?.lastName ?? user.lastName;
-    const verifiedFullName =
-      bvnMeta?.fullName ?? `${verifiedFirstName} ${verifiedLastName}`;
+    // ── ALL CHECKS PASSED ─────────────────────────────────────────────────────
+    // Pull the BVN-verified name that was normalised and stored in Step 1.
+    // This is the single source of truth — we never use the NIN result name.
+    const { firstName, lastName, fullName } = this.resolveVerifiedName(
+      kycRecord!.metadata as any,
+      user,
+    );
 
-    // Update user profile with BVN-verified name
-    await this.userRepo.update(userId, {
-      kycStatus: KycStatus.VERIFIED,
-      firstName: verifiedFirstName,
-      lastName: verifiedLastName,
-      verifiedName: verifiedFullName,
-    });
+    // Replace user profile with BVN-verified identity
+    await this.applyVerifiedNameToUser(userId, firstName, lastName, fullName);
 
-    // Update KYC record with full verification data
+    // Update KYC record to VERIFIED with full audit trail
     await this.updateKyc(kycRecord!.id, {
       status: KycStatus.VERIFIED,
       reviewedAt: new Date(),
@@ -368,9 +357,10 @@ export class KycService {
         ninHash,
         ninJobId: result.jobId,
         smileJobId: result.smileJobId,
-        verifiedName: verifiedFullName,
-        verifiedFirstName,
-        verifiedLastName,
+        // Record exactly what was written to the user profile
+        verifiedName: fullName,
+        verifiedFirstName: firstName,
+        verifiedLastName: lastName,
         dateOfBirth: result.dateOfBirth,
         gender: result.gender,
         resultCode: result.resultCode,
@@ -378,8 +368,7 @@ export class KycService {
       },
     });
 
-    // Send approval notifications
-    await this.sendKycApprovedNotifications(user, verifiedFullName);
+    await this.sendKycApprovedNotifications(user, fullName);
 
     await this.saveAudit(
       userId,
@@ -391,19 +380,24 @@ export class KycService {
       {
         jobId: result.jobId,
         resultCode: result.resultCode,
-        verifiedName: verifiedFullName,
+        verifiedName: fullName,
         nameSource: 'bvn',
+        previousFirstName: user.firstName,
+        previousLastName: user.lastName,
       },
     );
 
     this.logger.log(
-      `KYC VERIFIED: userId=${userId} name="${verifiedFullName}" jobId=${result.jobId}`,
+      `KYC VERIFIED: userId=${userId} name="${fullName}" ` +
+        `(was: "${user.firstName} ${user.lastName}") jobId=${result.jobId}`,
     );
 
     return {
       verified: true,
-      fullName: verifiedFullName,
-      message: `Identity verified successfully. Your profile name has been updated to ${verifiedFullName}.`,
+      fullName,
+      message:
+        `Identity verified successfully. Your profile has been updated to ` +
+        `${fullName}.`,
     };
   }
 
@@ -412,7 +406,6 @@ export class KycService {
     payload: string,
     dto: SmileWebhookDto,
   ): Promise<{ received: boolean }> {
-    // Verify signature
     const isValid = this.smileService.verifyWebhookSignature(
       dto.timestamp,
       dto.signature,
@@ -420,7 +413,6 @@ export class KycService {
 
     if (!isValid) {
       this.logger.warn('Invalid Smile Identity webhook signature');
-      // Don't throw — still process to avoid missed events
     }
 
     this.logger.log(
@@ -454,19 +446,18 @@ export class KycService {
     if (!user) return { received: true };
 
     if (result.success && result.faceVerified && result.livenessCheck) {
-      // Use BVN-verified name from metadata, not the webhook result
-      const bvnMeta = kycRecord.metadata as any;
-      const verifiedFirstName = bvnMeta?.firstName ?? user.firstName;
-      const verifiedLastName = bvnMeta?.lastName ?? user.lastName;
-      const verifiedFullName =
-        bvnMeta?.fullName ?? `${verifiedFirstName} ${verifiedLastName}`;
+      // Same resolution logic as the NIN step — always use BVN metadata name
+      const { firstName, lastName, fullName } = this.resolveVerifiedName(
+        kycRecord.metadata as any,
+        user,
+      );
 
-      await this.userRepo.update(kycRecord.userId, {
-        kycStatus: KycStatus.VERIFIED,
-        firstName: verifiedFirstName,
-        lastName: verifiedLastName,
-        verifiedName: verifiedFullName,
-      });
+      await this.applyVerifiedNameToUser(
+        kycRecord.userId,
+        firstName,
+        lastName,
+        fullName,
+      );
 
       await this.updateKyc(kycRecord.id, {
         status: KycStatus.VERIFIED,
@@ -474,16 +465,18 @@ export class KycService {
         metadata: {
           ...((kycRecord.metadata as any) ?? {}),
           webhookVerified: true,
-          verifiedName: verifiedFullName,
+          verifiedName: fullName,
+          verifiedFirstName: firstName,
+          verifiedLastName: lastName,
           resultCode: result.resultCode,
           finalVerifiedAt: new Date().toISOString(),
         },
       });
 
-      await this.sendKycApprovedNotifications(user, verifiedFullName);
+      await this.sendKycApprovedNotifications(user, fullName);
 
       this.logger.log(
-        `KYC VERIFIED via webhook: userId=${kycRecord.userId} name="${verifiedFullName}"`,
+        `KYC VERIFIED via webhook: userId=${kycRecord.userId} name="${fullName}"`,
       );
     } else {
       const reason = `Verification failed: ${result.resultText} (${result.resultCode})`;
@@ -533,7 +526,18 @@ export class KycService {
     const user = record.user as User;
 
     if (newStatus === KycStatus.VERIFIED) {
-      await this.sendKycApprovedNotifications(user, user.firstName);
+      // Admin approval also applies the BVN-verified name if it was captured
+      const { firstName, lastName, fullName } = this.resolveVerifiedName(
+        record.metadata as any,
+        user,
+      );
+      await this.applyVerifiedNameToUser(
+        record.userId,
+        firstName,
+        lastName,
+        fullName,
+      );
+      await this.sendKycApprovedNotifications(user, fullName);
     } else {
       await this.sendKycRejectedNotifications(
         user,
@@ -588,6 +592,103 @@ export class KycService {
     return record;
   }
 
+  // ── PRIVATE: EXTRACT VERIFIED NAME (from Smile Identity result) ───────────────
+  //
+  // Normalises the name returned by Smile Identity at BVN verification time.
+  // Handles three common shapes:
+  //   1. firstName + lastName both present   → use as-is
+  //   2. fullName only, single word           → treat as firstName, lastName = ''
+  //   3. fullName only, multiple words        → first token = firstName,
+  //                                             rest joined = lastName
+  //
+  // This is the ONLY place Smile-supplied name strings are processed.
+  // Every downstream path (NIN step, webhook, admin review) reads from the
+  // already-normalised values stored in KYC metadata.
+  // ─────────────────────────────────────────────────────────────────────────────
+  private extractVerifiedName(
+    rawFullName: string | null | undefined,
+    rawFirstName: string | null | undefined,
+    rawLastName: string | null | undefined,
+  ): { firstName: string; lastName: string; fullName: string } {
+    const trim = (s: string | null | undefined) => (s ?? '').trim();
+
+    let firstName = trim(rawFirstName);
+    let lastName = trim(rawLastName);
+
+    // If Smile returned explicit first/last names, prefer those
+    if (firstName || lastName) {
+      const fullName = [firstName, lastName].filter(Boolean).join(' ');
+      return { firstName, lastName, fullName };
+    }
+
+    // Fall back to splitting fullName
+    const full = trim(rawFullName);
+    if (!full) {
+      // Nothing usable — caller will fall back to existing user names
+      return { firstName: '', lastName: '', fullName: '' };
+    }
+
+    const parts = full.split(/\s+/);
+    if (parts.length === 1) {
+      return { firstName: parts[0], lastName: '', fullName: parts[0] };
+    }
+
+    firstName = parts[0];
+    lastName = parts.slice(1).join(' ');
+    return { firstName, lastName, fullName: full };
+  }
+
+  // ── PRIVATE: RESOLVE VERIFIED NAME (from KYC metadata) ───────────────────────
+  //
+  // Reads the BVN-verified name that was normalised and stored in Step 1.
+  // Falls back to the user's current profile names only if metadata is absent
+  // (e.g. records created before this logic was added).
+  // ─────────────────────────────────────────────────────────────────────────────
+  private resolveVerifiedName(
+    metadata: Record<string, any> | null | undefined,
+    user: User,
+  ): { firstName: string; lastName: string; fullName: string } {
+    const meta = metadata ?? {};
+
+    const firstName =
+      (meta.firstName as string | undefined)?.trim() || user.firstName;
+    const lastName =
+      (meta.lastName as string | undefined)?.trim() || user.lastName;
+
+    // Prefer the stored fullName; rebuild from parts only if absent
+    const fullName =
+      (meta.fullName as string | undefined)?.trim() ||
+      [firstName, lastName].filter(Boolean).join(' ');
+
+    return { firstName, lastName, fullName };
+  }
+
+  // ── PRIVATE: APPLY VERIFIED NAME TO USER ──────────────────────────────────────
+  //
+  // Single function that owns the user profile name update.
+  // Called by: verifyNinWithFace, handleSmileWebhook, adminReview.
+  // Always sets firstName, lastName, verifiedName, and kycStatus together
+  // so the user row is never left in a partial state.
+  // ─────────────────────────────────────────────────────────────────────────────
+  private async applyVerifiedNameToUser(
+    userId: string,
+    firstName: string,
+    lastName: string,
+    fullName: string,
+  ): Promise<void> {
+    await this.userRepo.update(userId, {
+      firstName,
+      lastName,
+      verifiedName: fullName,
+      kycStatus: KycStatus.VERIFIED,
+    });
+
+    this.logger.log(
+      `User profile updated: userId=${userId} firstName="${firstName}" ` +
+        `lastName="${lastName}" verifiedName="${fullName}"`,
+    );
+  }
+
   // ── PRIVATE: SEND APPROVED NOTIFICATIONS ──────────────────────────────────────
   private async sendKycApprovedNotifications(
     user: User,
@@ -633,12 +734,6 @@ export class KycService {
 
   // ── PRIVATE HELPERS ───────────────────────────────────────────────────────────
 
-  /**
-   * TypeORM's _QueryDeepPartialEntity rejects plain jsonb object literals
-   * when the column is typed as `any` — the cast must happen at the partial
-   * object level, not on the metadata value itself. Centralising it here
-   * keeps every call-site clean.
-   */
   private async updateKyc(
     id: string,
     partial: Partial<KycRecord>,
