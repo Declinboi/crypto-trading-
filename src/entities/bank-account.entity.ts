@@ -15,6 +15,7 @@ import { Payout } from './payout.entity';
 
 @Entity('bank_accounts')
 @Index(['userId'])
+@Index(['accountNumberHash']) // fast lookup by account number
 export class BankAccount {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -26,14 +27,21 @@ export class BankAccount {
   @JoinColumn({ name: 'user_id' })
   user: User;
 
-  @Column({ type: 'varchar', length: 200, name: 'account_name' })
-  accountName: string; // verified name from Flutterwave name enquiry
+  // ── ENCRYPTED — sensitive financial PII ──────────────────────────────────────
+  @Column({ type: 'text', name: 'account_name' })
+  accountName: string; // AES-256-GCM encrypted
 
-  @Column({ type: 'varchar', length: 20, name: 'account_number' })
-  accountNumber: string; // 10-digit NUBAN
+  @Column({ type: 'text', name: 'account_number' })
+  accountNumber: string; // AES-256-GCM encrypted
 
+  // ── HMAC hash for uniqueness check and fast lookup ───────────────────────────
+  // Allows: "does this account already exist?" without decrypting
+  @Column({ type: 'varchar', length: 64, name: 'account_number_hash' })
+  accountNumberHash: string; // HMAC-SHA256
+
+  // ── Plaintext — not sensitive, needed for display/routing ─────────────────────
   @Column({ type: 'varchar', length: 10, name: 'bank_code' })
-  bankCode: string; // CBN bank code e.g. 057 for Zenith
+  bankCode: string;
 
   @Column({ type: 'varchar', length: 100, name: 'bank_name' })
   bankName: string;
@@ -45,15 +53,11 @@ export class BankAccount {
   isDefault: boolean;
 
   @Column({ type: 'boolean', name: 'is_verified', default: false })
-  isVerified: boolean; // true after Flutterwave name enquiry passes
+  isVerified: boolean;
 
-  @Column({
-    type: 'varchar',
-    length: 100,
-    name: 'flw_recipient_id',
-    nullable: true,
-  })
-  flwRecipientId: string | null; // Flutterwave saved transfer recipient
+  // ── ENCRYPTED — external provider reference ───────────────────────────────────
+  @Column({ type: 'text', name: 'flw_recipient_id', nullable: true })
+  flwRecipientId: string | null; // AES-256-GCM encrypted
 
   @DeleteDateColumn({ type: 'timestamptz', name: 'deleted_at' })
   deletedAt: Date | null;
@@ -64,7 +68,6 @@ export class BankAccount {
   @UpdateDateColumn({ type: 'timestamptz', name: 'updated_at' })
   updatedAt: Date;
 
-  // ── Relations ──────────────────────────────────────────────────────────────
   @OneToMany(() => Payout, (payout) => payout.bankAccount)
   payouts: Payout[];
 }

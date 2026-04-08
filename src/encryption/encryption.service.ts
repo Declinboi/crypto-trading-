@@ -1,220 +1,138 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import crypto from 'crypto';
+import * as crypto from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
-const IV_LENGTH = 16; // 128 bits
-const TAG_LENGTH = 16; // 128 bits auth tag
-const KEY_LENGTH = 32; // 256 bits
-
-export interface EncryptedPayload {
-  iv: string; // hex
-  tag: string; // hex — auth tag, detects tampering
-  ciphertext: string; // hex
-  version: number; // key version for rotation support
-}
+const IV_LENGTH = 16; // AES block size
+const TAG_LENGTH = 16; // GCM auth tag
+const KEY_LENGTH = 32; // AES-256
 
 @Injectable()
-export class EncryptionService implements OnModuleInit {
+export class EncryptionService {
   private readonly logger = new Logger(EncryptionService.name);
-  private encryptionKey: Buffer;
-  private keyVersion: number;
+  private readonly key: Buffer;
+  private readonly hmacKey: Buffer;
 
-  constructor(private config: ConfigService) {}
+  constructor(private config: ConfigService) {
+    const rawKey = config.get<string>('ENCRYPTION_KEY');
+    const rawHmacKey = config.get<string>('ENCRYPTION_HMAC_KEY');
 
-  onModuleInit() {
-    const rawKey = this.config.get<string>('ENCRYPTION_KEY');
-    if (!rawKey) {
+    if (!rawKey || !rawHmacKey) {
       throw new Error(
-        'ENCRYPTION_KEY is not set. Generate one with: ' +
-          "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
+        'ENCRYPTION_KEY and ENCRYPTION_HMAC_KEY must be set in .env. ' +
+          "Generate with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
       );
     }
 
-    // Key must be exactly 64 hex chars (32 bytes = 256 bits)
-    if (rawKey.length !== 64) {
+    // Keys must be exactly 64 hex chars (32 bytes)
+    this.key = Buffer.from(rawKey, 'hex');
+    this.hmacKey = Buffer.from(rawHmacKey, 'hex');
+
+    if (this.key.length !== KEY_LENGTH) {
       throw new Error(
-        `ENCRYPTION_KEY must be 64 hex characters (32 bytes). Got ${rawKey.length}.`,
+        `ENCRYPTION_KEY must be 64 hex characters (32 bytes). Got ${this.key.length} bytes.`,
       );
     }
-
-    this.encryptionKey = Buffer.from(rawKey, 'hex');
-    this.keyVersion = Number(
-      this.config.get<string>('ENCRYPTION_KEY_VERSION') ?? '1',
-    );
-
-    this.logger.log(
-      `Encryption service ready — algorithm=${ALGORITHM} keyVersion=${this.keyVersion}`,
-    );
+    if (this.hmacKey.length !== KEY_LENGTH) {
+      throw new Error(
+        `ENCRYPTION_HMAC_KEY must be 64 hex characters (32 bytes). Got ${this.hmacKey.length} bytes.`,
+      );
+    }
   }
 
   // ── ENCRYPT ───────────────────────────────────────────────────────────────────
+  // Output format: base64(iv[16] + ciphertext + authTag[16])
+  // All three components are bundled — no separate storage needed
   encrypt(plaintext: string): string {
     if (!plaintext) return plaintext;
 
-    const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv(ALGORITHM, this.encryptionKey, iv, {
-      authTagLength: TAG_LENGTH,
-    });
+    try {
+      const iv = crypto.randomBytes(IV_LENGTH);
+      const cipher = crypto.createCipheriv(ALGORITHM, this.key, iv);
 
-    const encrypted = Buffer.concat([
-      cipher.update(plaintext, 'utf8'),
-      cipher.final(),
-    ]);
+      const encrypted = Buffer.concat([
+        cipher.update(plaintext, 'utf8'),
+        cipher.final(),
+      ]);
 
-    const tag = cipher.getAuthTag();
+      const tag = cipher.getAuthTag(); // 16-byte GCM auth tag
 
-    const payload: EncryptedPayload = {
-      iv: iv.toString('hex'),
-      tag: tag.toString('hex'),
-      ciphertext: encrypted.toString('hex'),
-      version: this.keyVersion,
-    };
-
-    // Store as base64-encoded JSON for compact DB storage
-    return Buffer.from(JSON.stringify(payload)).toString('base64');
+      // Bundle: iv (16) + ciphertext (n) + tag (16)
+      const bundle = Buffer.concat([iv, encrypted, tag]);
+      return bundle.toString('base64');
+    } catch (err) {
+      this.logger.error(`Encryption failed: ${err.message}`);
+      throw new Error('Encryption failed');
+    }
   }
 
   // ── DECRYPT ───────────────────────────────────────────────────────────────────
-  decrypt(encryptedData: string): string {
-    if (!encryptedData) return encryptedData;
-
-    // Detect unencrypted legacy data — return as-is
-    if (!this.isEncrypted(encryptedData)) {
-      this.logger.warn(
-        'Attempting to decrypt non-encrypted data — returning as-is',
-      );
-      return encryptedData;
-    }
+  decrypt(ciphertext: string): string {
+    if (!ciphertext) return ciphertext;
 
     try {
-      const payload: EncryptedPayload = JSON.parse(
-        Buffer.from(encryptedData, 'base64').toString('utf8'),
+      const bundle = Buffer.from(ciphertext, 'base64');
+
+      // Minimum length: IV(16) + at least 1 byte ciphertext + tag(16) = 33
+      if (bundle.length < IV_LENGTH + TAG_LENGTH + 1) {
+        throw new Error('Invalid ciphertext length');
+      }
+
+      const iv = bundle.subarray(0, IV_LENGTH);
+      const tag = bundle.subarray(bundle.length - TAG_LENGTH);
+      const encryptedData = bundle.subarray(
+        IV_LENGTH,
+        bundle.length - TAG_LENGTH,
       );
 
-      // Key rotation: if version differs, load the old key
-      const key = this.resolveKey(payload.version);
-
-      const decipher = crypto.createDecipheriv(
-        ALGORITHM,
-        key,
-        Buffer.from(payload.iv, 'hex'),
-        {
-          authTagLength: TAG_LENGTH,
-        },
-      );
-
-      decipher.setAuthTag(Buffer.from(payload.tag, 'hex'));
+      const decipher = crypto.createDecipheriv(ALGORITHM, this.key, iv);
+      decipher.setAuthTag(tag);
 
       const decrypted = Buffer.concat([
-        decipher.update(Buffer.from(payload.ciphertext, 'hex')),
+        decipher.update(encryptedData),
         decipher.final(),
       ]);
 
       return decrypted.toString('utf8');
     } catch (err) {
       this.logger.error(`Decryption failed: ${err.message}`);
-      throw new Error('Failed to decrypt data — possible tampering detected');
+      throw new Error(
+        'Decryption failed — data may be corrupted or key mismatch',
+      );
     }
   }
 
-  // ── ENCRYPT OBJECT (encrypt specific fields) ──────────────────────────────────
-  encryptFields<T extends Record<string, any>>(obj: T, fields: (keyof T)[]): T {
-    const result = { ...obj };
-    for (const field of fields) {
-      if (result[field] && typeof result[field] === 'string') {
-        (result as any)[field] = this.encrypt(result[field] as string);
-      }
-    }
-    return result;
+  // ── ENCRYPT NULLABLE ──────────────────────────────────────────────────────────
+  encryptNullable(value: string | null | undefined): string | null {
+    if (value === null || value === undefined) return null;
+    return this.encrypt(value);
   }
 
-  // ── DECRYPT OBJECT ────────────────────────────────────────────────────────────
-  decryptFields<T extends Record<string, any>>(obj: T, fields: (keyof T)[]): T {
-    const result = { ...obj };
-    for (const field of fields) {
-      if (result[field] && typeof result[field] === 'string') {
-        try {
-          (result as any)[field] = this.decrypt(result[field] as string);
-        } catch {
-          // Don't crash if a single field fails — log and continue
-          this.logger.error(`Failed to decrypt field: ${String(field)}`);
-        }
-      }
-    }
-    return result;
+  decryptNullable(value: string | null | undefined): string | null {
+    if (value === null || value === undefined) return null;
+    return this.decrypt(value);
   }
 
-  // ── HASH (one-way, for lookups) ───────────────────────────────────────────────
-  // Use for: BVN, NIN, account numbers used as lookup keys
+  // ── HMAC HASH — for searchable/deduplicated fields ────────────────────────────
+  // Used for: BVN dedup, NIN dedup, account number lookup
+  // HMAC-SHA256 is one-way — cannot be reversed, but same input = same hash
   hash(value: string): string {
+    if (!value) return value;
     return crypto
-      .createHmac('sha256', this.encryptionKey)
+      .createHmac('sha256', this.hmacKey)
       .update(value.toLowerCase().trim())
       .digest('hex');
   }
 
-  // ── DETERMINISTIC ENCRYPT (same input → same output, for searchable fields) ───
-  // Use for: account numbers you need to search by
-  // Less secure than random IV — only use when search is required
-  deterministicEncrypt(value: string): string {
-    // Derive a deterministic IV from the value + key (not random)
-    const iv = crypto
-      .createHmac('sha256', this.encryptionKey)
-      .update(`det:${value}`)
-      .digest()
-      .slice(0, IV_LENGTH);
-
-    const cipher = crypto.createCipheriv(ALGORITHM, this.encryptionKey, iv, {
-      authTagLength: TAG_LENGTH,
-    });
-
-    const encrypted = Buffer.concat([
-      cipher.update(value, 'utf8'),
-      cipher.final(),
-    ]);
-
-    const tag = cipher.getAuthTag();
-
-    const payload: EncryptedPayload = {
-      iv: iv.toString('hex'),
-      tag: tag.toString('hex'),
-      ciphertext: encrypted.toString('hex'),
-      version: this.keyVersion,
-    };
-
-    return Buffer.from(JSON.stringify(payload)).toString('base64');
-  }
-
-  // ── MASK (for display) ────────────────────────────────────────────────────────
+  // ── MASK — for display purposes only ─────────────────────────────────────────
+  // e.g. accountNumber → "****5678"
   mask(value: string, visibleChars = 4): string {
-    if (!value || value.length <= visibleChars) return '****';
+    if (!value || value.length <= visibleChars) return value;
     return `${'*'.repeat(value.length - visibleChars)}${value.slice(-visibleChars)}`;
   }
 
-  // ── CHECK IF VALUE IS ALREADY ENCRYPTED ───────────────────────────────────────
-  isEncrypted(value: string): boolean {
-    try {
-      const decoded = Buffer.from(value, 'base64').toString('utf8');
-      const parsed = JSON.parse(decoded);
-      return !!(parsed.iv && parsed.tag && parsed.ciphertext && parsed.version);
-    } catch {
-      return false;
-    }
-  }
-
-  // ── KEY ROTATION SUPPORT ──────────────────────────────────────────────────────
-  private resolveKey(version: number): Buffer {
-    if (version === this.keyVersion) return this.encryptionKey;
-
-    // Load old key for decryption during rotation period
-    const oldKey = this.config.get<string>(`ENCRYPTION_KEY_V${version}`);
-    if (!oldKey) {
-      throw new Error(
-        `Cannot decrypt — old key version ${version} not found. ` +
-          `Set ENCRYPTION_KEY_V${version} in .env`,
-      );
-    }
-    return Buffer.from(oldKey, 'hex');
+  // ── GENERATE SECURE KEY — utility for key generation ─────────────────────────
+  static generateKey(): string {
+    return crypto.randomBytes(KEY_LENGTH).toString('hex');
   }
 }

@@ -1,35 +1,9 @@
 import { EncryptionService } from './encryption.service';
 
-// Singleton reference — set once when EncryptionService is initialized
-let _encryptionService: EncryptionService | null = null;
+// Used as: @Column({ transformer: encryptedTransformer(encryptionService) })
+// Encryption happens automatically on save, decryption on load
 
-export function setEncryptionService(service: EncryptionService) {
-  _encryptionService = service;
-}
-
-export function getEncryptionService(): EncryptionService {
-  if (!_encryptionService) {
-    throw new Error('EncryptionService not initialized yet');
-  }
-  return _encryptionService;
-}
-
-// Use this as a TypeORM column transformer
-export const EncryptedColumnTransformer = {
-  to(value: string | null): string | null {
-    if (!value) return value;
-    try {
-      return getEncryptionService().encrypt(value);
-    } catch {
-      return value;
-    }
-  },
-  from(value: string | null): string | null {
-    if (!value) return value;
-    try {
-      return getEncryptionService().decrypt(value);
-    } catch {
-      return value;
-    }
-  },
-};
+export const encryptedTransformer = (enc: EncryptionService) => ({
+  to: (value: string | null) => enc.encryptNullable(value),
+  from: (value: string | null) => enc.decryptNullable(value),
+});

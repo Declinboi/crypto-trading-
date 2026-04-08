@@ -23,21 +23,30 @@ import { Referral } from './referral.entity';
 @Entity('users')
 @Index(['email'], { unique: true })
 @Index(['referralCode'], { unique: true })
+@Index(['phoneHash'], { unique: true, where: '"phone_hash" IS NOT NULL' })
 export class User {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  // ── Plaintext — needed for login lookup ──────────────────────────────────────
   @Column({ type: 'varchar', length: 255, unique: true })
   email: string;
 
+  // ── Argon2id hash — never store raw password ─────────────────────────────────
   @Column({ type: 'varchar', length: 255, name: 'password_hash' })
   passwordHash: string;
 
+  // ── Plaintext — low sensitivity, used in UI ───────────────────────────────────
   @Column({ type: 'varchar', length: 100, name: 'first_name' })
   firstName: string;
 
   @Column({ type: 'varchar', length: 100, name: 'last_name' })
   lastName: string;
+
+  // ── ENCRYPTED — verified legal name from government ID ───────────────────────
+  // Stored encrypted; decrypted only when needed for display/KYC
+  @Column({ type: 'text', name: 'verified_name', nullable: true })
+  verifiedName: string | null; // stored as AES-256-GCM ciphertext
 
   @Column({ type: 'text', name: 'avatar_url', nullable: true })
   avatarUrl: string | null;
@@ -56,14 +65,6 @@ export class User {
   @Column({ type: 'boolean', name: 'is_active', default: true })
   isActive: boolean;
 
-  @Column({
-    type: 'varchar',
-    length: 255,
-    name: 'verified_name',
-    nullable: true,
-  })
-  verifiedName: string | null;
-
   @Column({ type: 'boolean', name: 'is_email_verified', default: false })
   isEmailVerified: boolean;
 
@@ -75,35 +76,39 @@ export class User {
   })
   twoFaMethod: TwoFaMethod;
 
+  // ── ENCRYPTED phone — stored as ciphertext ────────────────────────────────────
+  // phoneHash: HMAC for uniqueness check and WhatsApp bot lookup
+  // phone:     AES-256-GCM encrypted — decrypted only when needed
+  @Column({ type: 'text', name: 'phone', nullable: true })
+  phone: string | null; // encrypted
+
   @Column({
     type: 'varchar',
-    length: 20,
-    name: 'phone',
+    length: 64,
+    name: 'phone_hash',
     nullable: true,
     unique: true,
   })
-  phone: string | null;
+  phoneHash: string | null; // HMAC-SHA256 — used for lookups/dedup
 
   @Column({ type: 'boolean', name: 'is_phone_verified', default: false })
   isPhoneVerified: boolean;
 
   @Column({ type: 'boolean', name: 'two_fa_enabled', default: true })
-  twoFaEnabled: boolean; // always true by default since email OTP is default
+  twoFaEnabled: boolean;
 
-  @Column({
-    type: 'varchar',
-    length: 100,
-    name: 'two_fa_secret',
-    nullable: true,
-  })
-  twoFaSecret: string | null; // only populated when using authenticator app
+  // ── ENCRYPTED — TOTP secret for authenticator app ────────────────────────────
+  @Column({ type: 'text', name: 'two_fa_secret', nullable: true })
+  twoFaSecret: string | null; // encrypted
 
+  // ── Short-lived OTP — plaintext is fine (expires in 10 min) ──────────────────
   @Column({ type: 'varchar', length: 10, name: 'email_otp', nullable: true })
-  emailOtp: string | null; // current email OTP code
+  emailOtp: string | null;
 
   @Column({ type: 'timestamptz', name: 'email_otp_expires_at', nullable: true })
-  emailOtpExpiresAt: Date | null; // OTP expiry
+  emailOtpExpiresAt: Date | null;
 
+  // ── Argon2id hash — never store raw PIN ──────────────────────────────────────
   @Column({ type: 'varchar', length: 255, name: 'pin_hash', nullable: true })
   pinHash: string | null;
 
@@ -136,30 +141,14 @@ export class User {
   updatedAt: Date;
 
   // ── Relations ──────────────────────────────────────────────────────────────
-  @OneToMany(() => Invoice, (invoice) => invoice.user)
-  invoices: Invoice[];
-
-  @OneToMany(() => BankAccount, (ba) => ba.user)
-  bankAccounts: BankAccount[];
-
+  @OneToMany(() => Invoice, (i) => i.user) invoices: Invoice[];
+  @OneToMany(() => BankAccount, (ba) => ba.user) bankAccounts: BankAccount[];
   @OneToMany(() => WalletAddress, (wa) => wa.user)
   walletAddresses: WalletAddress[];
-
-  @OneToMany(() => Transaction, (tx) => tx.user)
-  transactions: Transaction[];
-
-  @OneToMany(() => KycRecord, (kyc) => kyc.user)
-  kycRecords: KycRecord[];
-
-  @OneToMany(() => Notification, (n) => n.user)
-  notifications: Notification[];
-
-  @OneToMany(() => AuditLog, (log) => log.user)
-  auditLogs: AuditLog[];
-
-  @OneToMany(() => Referral, (r) => r.referrer)
-  referralsMade: Referral[];
-
-  @OneToMany(() => Referral, (r) => r.referred)
-  referralsReceived: Referral[];
+  @OneToMany(() => Transaction, (tx) => tx.user) transactions: Transaction[];
+  @OneToMany(() => KycRecord, (kyc) => kyc.user) kycRecords: KycRecord[];
+  @OneToMany(() => Notification, (n) => n.user) notifications: Notification[];
+  @OneToMany(() => AuditLog, (log) => log.user) auditLogs: AuditLog[];
+  @OneToMany(() => Referral, (r) => r.referrer) referralsMade: Referral[];
+  @OneToMany(() => Referral, (r) => r.referred) referralsReceived: Referral[];
 }

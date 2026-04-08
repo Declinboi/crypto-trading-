@@ -51,6 +51,9 @@ import {
 import { JwtPayload } from './strategies/jwt.strategy';
 import { REDIS_CLIENT } from '../redis/redis.module';
 import Redis from 'ioredis';
+import { EncryptionService } from '../encryption/encryption.service';
+import { EncryptionHelper }  from '../encryption/encryption.helper';
+
 
 @Injectable()
 export class AuthService {
