@@ -52,11 +52,12 @@ import { JwtPayload } from './strategies/jwt.strategy';
 import { REDIS_CLIENT } from '../redis/redis.module';
 import Redis from 'ioredis';
 import { EncryptionService } from '../encryption/encryption.service';
-import { EncryptionHelper }  from '../encryption/encryption.helper';
-
+import { EncryptionHelper } from '../encryption/encryption.helper';
 
 @Injectable()
 export class AuthService {
+  private readonly encHelper: EncryptionHelper;
+
   constructor(
     @InjectRepository(User)
     private userRepo: Repository<User>,
@@ -73,7 +74,10 @@ export class AuthService {
     private jwtService: JwtService,
     private config: ConfigService,
     private emailService: EmailService,
-  ) {}
+    private encryptionService: EncryptionService,
+  ) {
+    this.encHelper = new EncryptionHelper(this.encryptionService);
+  }
 
   // ── REDIS KEY HELPERS ─────────────────────────────────────────────────────────
   private rk = {
@@ -93,7 +97,6 @@ export class AuthService {
     pending2fa: 10 * 60, // 10 min
   } as const;
 
-  // Generic typed get/set/del helpers
   private async redisSet(key: string, userId: string, ttlSeconds: number) {
     await this.redis.setex(key, ttlSeconds, userId);
   }
@@ -105,12 +108,8 @@ export class AuthService {
   private async redisDel(key: string) {
     await this.redis.del(key);
   }
-  // ── REGISTER ──────────────────────────────────────────────────────────────────
-  // Phone is now collected at registration and stored unverified.
-  // isPhoneVerified stays false until the user completes the
-  // POST /auth/phone/verify flow.
-  // ─────────────────────────────────────────────────────────────────────────────
 
+  // ── REGISTER ──────────────────────────────────────────────────────────────────
   async register(dto: RegisterDto, ipAddress?: string) {
     const existing = await this.userRepo.findOne({
       where: { email: dto.email },
@@ -120,9 +119,11 @@ export class AuthService {
       throw new ConflictException('An account with this email already exists');
     }
 
+    // Phone dedup — look up by phoneHash (HMAC) instead of plaintext phone
     if (dto.phone) {
+      const phoneHash = this.encryptionService.hash(dto.phone);
       const phoneTaken = await this.userRepo.findOne({
-        where: { phone: dto.phone },
+        where: { phoneHash },
         withDeleted: true,
       });
       if (phoneTaken) {
@@ -149,12 +150,17 @@ export class AuthService {
 
     const referralCode = await this.generateUniqueReferralCode();
 
+    // Encrypt sensitive fields before persisting
+    const encryptedFields = this.encHelper.prepareUser({
+      phone: dto.phone ?? null,
+    });
+
     const user = this.userRepo.create({
       email: dto.email,
       passwordHash,
       firstName: dto.firstName,
       lastName: dto.lastName,
-      phone: dto.phone ?? null,
+      ...encryptedFields, // phone (encrypted) + phoneHash (HMAC)
       isPhoneVerified: false,
       referralCode,
       referredById: referredBy?.id ?? null,
@@ -180,6 +186,9 @@ export class AuthService {
       }),
     );
 
+    // Decrypt phone for WhatsApp OTP (needs plaintext)
+    const plainPhone = dto.phone ?? null;
+
     const parallelTasks: Promise<any>[] = [
       this.emailService.sendWelcome(user.email, {
         firstName: user.firstName,
@@ -191,10 +200,9 @@ export class AuthService {
       }),
     ];
 
-    if (user.phone) {
-      // throwOnRateLimit=false: a rate-limit hit must not abort registration
+    if (plainPhone) {
       parallelTasks.push(
-        this.whatsappOtp.sendOtp(user.phone, user.firstName, false),
+        this.whatsappOtp.sendOtp(plainPhone, user.firstName, false),
       );
     }
 
@@ -213,7 +221,7 @@ export class AuthService {
 
     const tokens = await this.generateTokens(user);
     return {
-      message: user.phone
+      message: plainPhone
         ? 'Registration successful. Please verify your email and phone number.'
         : 'Registration successful. Please verify your email.',
       user: this.sanitizeUser(user),
@@ -222,9 +230,6 @@ export class AuthService {
   }
 
   // ── SEND PHONE VERIFICATION OTP ───────────────────────────────────────────────
-  // Change: removed the in-memory phoneOtpRateLimit Map — rate-limiting is now
-  // fully inside WhatsappOtpService (Redis-backed, multi-instance safe).
-  // ─────────────────────────────────────────────────────────────────────────────
   async sendPhoneVerificationOtp(
     userId: string,
     dto: SendPhoneOtpDto,
@@ -236,7 +241,10 @@ export class AuthService {
     });
     if (!user) throw new NotFoundException('User not found');
 
-    const phone = user.phone ?? dto.phone;
+    // Decrypt stored phone before use
+    const decryptedUser = this.encHelper.decryptUser(user);
+    const phone = decryptedUser.phone ?? dto.phone;
+
     if (!phone) {
       throw new BadRequestException(
         'No phone number on file. Provide one in the request body.',
@@ -247,9 +255,11 @@ export class AuthService {
       throw new BadRequestException('Phone number is already verified');
     }
 
-    if (!user.phone || user.phone !== phone) {
+    if (!decryptedUser.phone || decryptedUser.phone !== phone) {
+      // Check new phone not already taken — dedup via phoneHash
+      const phoneHash = this.encryptionService.hash(phone);
       const phoneTaken = await this.userRepo.findOne({
-        where: { phone },
+        where: { phoneHash },
         withDeleted: true,
       });
       if (phoneTaken && phoneTaken.id !== userId) {
@@ -257,11 +267,12 @@ export class AuthService {
           'An account with this phone number already exists',
         );
       }
-      await this.userRepo.update(userId, { phone });
+
+      // Persist encrypted phone + updated phoneHash
+      const encryptedFields = this.encHelper.prepareUser({ phone });
+      await this.userRepo.update(userId, encryptedFields);
     }
 
-    // Rate-limit is enforced inside sendOtp (throwOnRateLimit=true by default).
-    // BadRequestException bubbles up naturally if the user is too fast.
     await this.whatsappOtp.sendOtp(phone, user.firstName);
 
     await this.saveAudit(
@@ -279,9 +290,6 @@ export class AuthService {
   }
 
   // ── VERIFY PHONE OTP ──────────────────────────────────────────────────────────
-  // Unchanged in logic; phoneOtpRateLimit.delete() call removed because the
-  // rate-limit key is now managed by WhatsappOtpService in Redis.
-  // ─────────────────────────────────────────────────────────────────────────────
   async verifyPhoneOtp(
     userId: string,
     dto: VerifyPhoneOtpDto,
@@ -301,13 +309,15 @@ export class AuthService {
       );
     }
 
-    const result = await this.whatsappOtp.verifyOtp(user.phone, dto.otp);
+    // Decrypt phone to pass plaintext to OTP service
+    const plainPhone = this.encryptionService.decryptNullable(user.phone)!;
+
+    const result = await this.whatsappOtp.verifyOtp(plainPhone, dto.otp);
     if (!result.valid) {
       throw new BadRequestException(result.reason ?? 'Invalid OTP');
     }
 
     await this.userRepo.update(userId, { isPhoneVerified: true });
-    // No phoneOtpRateLimit.delete() — rate-limit lives in Redis now
 
     await this.notifRepo.save(
       this.notifRepo.create({
@@ -327,7 +337,7 @@ export class AuthService {
       'users',
       userId,
       null,
-      { phone: user.phone },
+      { phone: plainPhone },
       ipAddress,
     );
 
@@ -368,31 +378,11 @@ export class AuthService {
     if (!passwordValid)
       throw new UnauthorizedException('Invalid email or password');
 
-    // ── 2FA GATE ────────────────────────────────────────────────────────────────
-    //
-    // Routing rule:
-    //   • twoFaMethod === AUTHENTICATOR  →  user has completed the authenticator
-    //     setup + confirm flow; require a TOTP code from their app.
-    //     No email OTP is sent — the app is the source of truth.
-    //
-    //   • twoFaMethod === EMAIL (default) →  send a 6-digit OTP to the user's
-    //     email address and require it to complete login.
-    //
-    // twoFaMethod is set to EMAIL on registration and only switches to
-    // AUTHENTICATOR after the user calls /auth/2fa/authenticator/confirm with
-    // a valid TOTP code.  It reverts to EMAIL if the user calls
-    // /auth/2fa/email to switch back.
-    // ────────────────────────────────────────────────────────────────────────────
     if (user.twoFaEnabled) {
       if (!dto.otpCode) {
-        // No code submitted yet — kick off the challenge.
         if (user.twoFaMethod === TwoFaMethod.EMAIL) {
-          // Send a fresh OTP to the user's inbox.
           await this.sendEmailOtp(user, ipAddress);
         }
-        // For AUTHENTICATOR we don't send anything — the code comes from
-        // the app.  We still issue a tempToken so the client can submit
-        // the TOTP on the /auth/login/verify-otp endpoint.
 
         const tempToken = crypto.randomBytes(32).toString('hex');
         await this.redisSet(
@@ -412,8 +402,6 @@ export class AuthService {
         };
       }
 
-      // Code was submitted inline with the login request — validate it
-      // immediately without a round-trip through verifyLoginOtp.
       await this.validateOtpCode(user, dto.otpCode);
     }
 
@@ -471,8 +459,6 @@ export class AuthService {
     if (!user || !user.isActive)
       throw new UnauthorizedException('User not found');
 
-    // validateOtpCode already branches on twoFaMethod — EMAIL checks the
-    // stored OTP, AUTHENTICATOR runs speakeasy.totp.verify.
     await this.validateOtpCode(user, dto.otp);
     await this.redisDel(this.rk.pending2fa(tempToken));
 
@@ -509,8 +495,6 @@ export class AuthService {
 
     if (!user) throw new NotFoundException('User not found');
 
-    // Resend is only meaningful for EMAIL — AUTHENTICATOR codes are generated
-    // locally on the device and never sent by the server.
     if (user.twoFaMethod !== TwoFaMethod.EMAIL) {
       throw new BadRequestException(
         'OTP resend is only available for email 2FA. Open your authenticator app to get a code.',
@@ -549,7 +533,7 @@ export class AuthService {
 
   // ── LOGOUT ────────────────────────────────────────────────────────────────────
   async logout(refreshToken: string, userId: string) {
-    await this.redisDel(this.rk.refresh(refreshToken)); // revoke token
+    await this.redisDel(this.rk.refresh(refreshToken));
     await this.saveAudit(
       userId,
       AuditActorType.USER,
@@ -573,7 +557,7 @@ export class AuthService {
     if (user.isEmailVerified) return { message: 'Email already verified' };
 
     await this.userRepo.update(user.id, { isEmailVerified: true });
-    await this.redisDel(this.rk.emailVerify(token)); // consume token
+    await this.redisDel(this.rk.emailVerify(token));
     await this.saveAudit(
       user.id,
       AuditActorType.USER,
@@ -677,9 +661,8 @@ export class AuthService {
     });
 
     await this.userRepo.update(user.id, { passwordHash });
-    await this.redisDel(this.rk.passwordReset(dto.token)); // consume token
+    await this.redisDel(this.rk.passwordReset(dto.token));
 
-    // Invalidate all refresh tokens for this user via key scan
     await this.revokeAllRefreshTokens(user.id);
 
     await this.saveAudit(
@@ -692,7 +675,6 @@ export class AuthService {
     return { message: 'Password reset successful. Please log in.' };
   }
 
-  // New helper — scans only the auth:refresh:* namespace (bounded scan)
   private async revokeAllRefreshTokens(userId: string): Promise<void> {
     let cursor = '0';
     do {
@@ -707,7 +689,6 @@ export class AuthService {
 
       if (keys.length === 0) continue;
 
-      // Fetch all values in one round-trip; drop keys that belong to this user
       const values = await this.redis.mget(...keys);
       const toDelete = keys.filter((_, i) => values[i] === userId);
       if (toDelete.length) await this.redis.del(...toDelete);
@@ -750,15 +731,6 @@ export class AuthService {
   }
 
   // ── 2FA: SWITCH TO AUTHENTICATOR APP ─────────────────────────────────────────
-  //
-  // Two-step flow:
-  //   1. GET  /auth/2fa/authenticator/setup   → generate secret + QR code
-  //   2. POST /auth/2fa/authenticator/confirm → verify first TOTP code,
-  //      then flip twoFaMethod to AUTHENTICATOR
-  //
-  // Until step 2 is completed the method stays EMAIL, so login is unaffected
-  // if the user abandons the setup midway.
-  // ─────────────────────────────────────────────────────────────────────────────
   async setup2FAAuthenticator(userId: string) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
@@ -777,9 +749,12 @@ export class AuthService {
       length: 20,
     });
 
-    // Store the secret now so confirm2FAAuthenticator can read it.
-    // twoFaMethod stays EMAIL until the user confirms with a valid TOTP.
-    await this.userRepo.update(userId, { twoFaSecret: secret.base32 });
+    // Encrypt twoFaSecret before storing
+    const encryptedFields = this.encHelper.prepareUser({
+      twoFaSecret: secret.base32,
+    });
+    await this.userRepo.update(userId, encryptedFields);
+
     const qrCode = await qrcode.toDataURL(secret.otpauth_url!);
 
     return {
@@ -809,8 +784,11 @@ export class AuthService {
       );
     }
 
+    // Decrypt before passing to speakeasy
+    const plainSecret = this.encryptionService.decrypt(user.twoFaSecret);
+
     const valid = speakeasy.totp.verify({
-      secret: user.twoFaSecret,
+      secret: plainSecret,
       encoding: 'base32',
       token: dto.code,
       window: 1,
@@ -818,8 +796,6 @@ export class AuthService {
     if (!valid)
       throw new BadRequestException('Invalid authenticator code. Try again.');
 
-    // Only NOW do we flip the method.  From this point forward, every login
-    // challenge will require a TOTP code from the app instead of an email OTP.
     await this.userRepo.update(userId, {
       twoFaMethod: TwoFaMethod.AUTHENTICATOR,
       twoFaEnabled: true,
@@ -838,10 +814,6 @@ export class AuthService {
   }
 
   // ── 2FA: SWITCH BACK TO EMAIL ─────────────────────────────────────────────────
-  //
-  // Requires a valid TOTP code to prove the user still has the device.
-  // After this, login reverts to sending a 6-digit OTP to email.
-  // ─────────────────────────────────────────────────────────────────────────────
   async switchToEmail2FA(userId: string, dto: SwitchToEmailDto) {
     const user = await this.userRepo.findOne({
       where: { id: userId },
@@ -853,16 +825,18 @@ export class AuthService {
       throw new BadRequestException('You are already using email 2FA');
     }
 
+    // Decrypt before passing to speakeasy
+    const plainSecret = this.encryptionService.decrypt(user.twoFaSecret!);
+
     const valid = speakeasy.totp.verify({
-      secret: user.twoFaSecret!,
+      secret: plainSecret,
       encoding: 'base32',
       token: dto.code,
       window: 1,
     });
     if (!valid) throw new BadRequestException('Invalid authenticator code');
 
-    // Flip back to EMAIL and wipe the TOTP secret.
-    // Next login will send an email OTP instead of prompting for the app.
+    // Wipe the encrypted secret and revert method to EMAIL
     await this.userRepo.update(userId, {
       twoFaMethod: TwoFaMethod.EMAIL,
       twoFaSecret: null,
@@ -982,7 +956,6 @@ export class AuthService {
       throw new BadRequestException('No PIN has been set for this account');
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const token = crypto.randomBytes(32).toString('hex');
 
     await this.redisSet(this.rk.pinReset(token), user.id, this.ttl.pinReset);
@@ -1030,7 +1003,7 @@ export class AuthService {
     });
 
     await this.userRepo.update(user.id, { pinHash, isPinSet: true });
-    await this.redisDel(this.rk.pinReset(dto.token)); // consume token
+    await this.redisDel(this.rk.pinReset(dto.token));
 
     await this.saveAudit(
       user.id,
@@ -1096,14 +1069,6 @@ export class AuthService {
   }
 
   // ── PRIVATE: VALIDATE OTP ─────────────────────────────────────────────────────
-  //
-  // Branches strictly on twoFaMethod:
-  //   EMAIL         → compare against the stored emailOtp (6-digit string match)
-  //   AUTHENTICATOR → run speakeasy.totp.verify against twoFaSecret (TOTP)
-  //
-  // This is the single source of truth for OTP validation; both the inline
-  // login path and the verifyLoginOtp endpoint call this method.
-  // ─────────────────────────────────────────────────────────────────────────────
   private async validateOtpCode(user: User, code: string) {
     if (user.twoFaMethod === TwoFaMethod.EMAIL) {
       const freshUser = await this.userRepo.findOne({
@@ -1127,14 +1092,12 @@ export class AuthService {
         throw new UnauthorizedException('Invalid OTP code');
       }
 
-      // Consume the OTP so it cannot be reused.
       await this.userRepo.update(user.id, {
         emailOtp: null,
         emailOtpExpiresAt: null,
       });
     } else {
-      // AUTHENTICATOR — verify TOTP against the stored secret.
-      // window: 1 allows ±30 s clock skew.
+      // AUTHENTICATOR — decrypt secret before verifying TOTP
       const freshUser = await this.userRepo.findOne({
         where: { id: user.id },
         select: ['id', 'twoFaSecret'],
@@ -1146,8 +1109,11 @@ export class AuthService {
         );
       }
 
+      // Decrypt the stored secret before passing to speakeasy
+      const plainSecret = this.encryptionService.decrypt(freshUser.twoFaSecret);
+
       const valid = speakeasy.totp.verify({
-        secret: freshUser.twoFaSecret,
+        secret: plainSecret,
         encoding: 'base32',
         token: code,
         window: 1,

@@ -35,8 +35,10 @@ import {
   FlutterwaveWebhookDto,
   PayoutQueryDto,
 } from './dto/flutterwave.dto';
+import { EncryptionService } from '../encryption/encryption.service';
+import { EncryptionHelper } from '../encryption/encryption.helper';
 
-import { SystemWalletTransaction, Transaction } from 'src/entities';
+import {  Transaction } from 'src/entities';
 
 @Injectable()
 export class FlutterwaveService {
@@ -45,6 +47,8 @@ export class FlutterwaveService {
   private readonly secretKey: string;
   private readonly webhookSecret: string;
   private readonly MAX_RETRIES = 3;
+
+  private readonly encHelper: EncryptionHelper;
 
   constructor(
     private config: ConfigService,
@@ -70,6 +74,7 @@ export class FlutterwaveService {
     private systemWalletService: SystemWalletService,
     private kafkaService: KafkaService,
     private dataSource: DataSource,
+    private encryptionService: EncryptionService,
   ) {
     this.secretKey = config.get<string>('FLUTTERWAVE_SECRET_KEY') as string;
     this.webhookSecret = config.get<string>(
@@ -84,6 +89,8 @@ export class FlutterwaveService {
       },
       timeout: 30000,
     });
+
+    this.encHelper = new EncryptionHelper(this.encryptionService);
   }
 
   // ── VERIFY BANK ACCOUNT ───────────────────────────────────────────────────────
@@ -131,7 +138,6 @@ export class FlutterwaveService {
   }
 
   // ── INITIATE DIRECT PAYOUT ────────────────────────────────────────────────────
-  // Used for both wallet withdrawals and auto-cashout
   async initiateDirectPayout(params: {
     userId: string;
     amountNgn: number;
@@ -146,6 +152,9 @@ export class FlutterwaveService {
     if (!bankAccount) throw new NotFoundException('Bank account not found');
     if (!bankAccount.isVerified)
       throw new BadRequestException('Bank account is not verified');
+
+    // Decrypt bank account fields for use in the transfer
+    const decryptedAccount = this.encHelper.decryptBankAccount(bankAccount);
 
     const platformFee = await this.getPayoutFeeNgn();
     const flwFee = await this.getTransferFee(params.amountNgn);
@@ -194,9 +203,10 @@ export class FlutterwaveService {
     }
 
     try {
+      // Use decrypted accountNumber and bankCode for the actual transfer
       const transfer = await this.executeTransfer({
-        accountNumber: bankAccount.accountNumber,
-        bankCode: bankAccount.bankCode,
+        accountNumber: decryptedAccount.accountNumber,
+        bankCode: bankAccount.bankCode, // bankCode is plaintext (not encrypted)
         amount: netAmount,
         narration: params.narration,
         reference: flwReference,
@@ -213,7 +223,6 @@ export class FlutterwaveService {
         ...(transfer.status === 'SUCCESSFUL' && { completedAt: new Date() }),
       });
 
-      // Deduct from system wallet reserve
       await this.systemWalletService.deductPayoutReserve(
         params.amountNgn,
         payout.id,
@@ -236,7 +245,6 @@ export class FlutterwaveService {
         },
       );
 
-      // Publish to Kafka
       await this.kafkaService.publish(KafkaTopic.PAYOUT_INITIATED, {
         payoutId: payout.id,
         userId: params.userId,
@@ -255,7 +263,8 @@ export class FlutterwaveService {
           params.userId,
           NotificationType.PAYOUT_SENT,
           'Payout Sent ✅',
-          `₦${netAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })} has been sent to your ${bankAccount.bankName} account ****${bankAccount.accountNumber.slice(-4)}.`,
+          // Use masked account for user-facing display
+          `₦${netAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })} has been sent to your ${bankAccount.bankName} account ****${decryptedAccount.accountNumber.slice(-4)}.`,
           {
             payoutId: payout.id,
             grossAmount: params.amountNgn,
@@ -324,6 +333,9 @@ export class FlutterwaveService {
     });
     if (!bankAccount) throw new NotFoundException('Bank account not found');
 
+    // Decrypt for the retry transfer
+    const decryptedAccount = this.encHelper.decryptBankAccount(bankAccount);
+
     const newReference = `CPAY-RETRY-${uuidv4().replace(/-/g, '').substring(0, 12).toUpperCase()}`;
 
     await this.payoutRepo.update(payoutId, {
@@ -336,8 +348,8 @@ export class FlutterwaveService {
 
     try {
       const transfer = await this.executeTransfer({
-        accountNumber: bankAccount.accountNumber,
-        bankCode: bankAccount.bankCode,
+        accountNumber: decryptedAccount.accountNumber,
+        bankCode: bankAccount.bankCode, // bankCode is plaintext
         amount: Number(payout.netAmountNgn),
         narration: payout.narration ?? 'CryptoPay NG payout retry',
         reference: newReference,
@@ -508,15 +520,19 @@ export class FlutterwaveService {
       completedAt: new Date().toISOString(),
     });
 
+    // Decrypt bank account for notification display
     const bankAccount = await this.bankAccountRepo.findOne({
       where: { id: payout.bankAccountId },
     });
+    const decryptedAccount = bankAccount
+      ? this.encHelper.decryptBankAccount(bankAccount)
+      : null;
 
     await this.sendNotification(
       payout.userId,
       NotificationType.PAYOUT_SENT,
       'Payout Successful ✅',
-      `₦${Number(payout.netAmountNgn).toLocaleString('en-NG', { minimumFractionDigits: 2 })} successfully sent to your ${bankAccount?.bankName ?? 'bank'} account ****${bankAccount?.accountNumber?.slice(-4) ?? '****'}.`,
+      `₦${Number(payout.netAmountNgn).toLocaleString('en-NG', { minimumFractionDigits: 2 })} successfully sent to your ${bankAccount?.bankName ?? 'bank'} account ****${decryptedAccount?.accountNumber?.slice(-4) ?? '****'}.`,
       {
         payoutId: payout.id,
         amount: payout.netAmountNgn,
@@ -564,7 +580,6 @@ export class FlutterwaveService {
       { payoutId: payout.id, reason: dto.data?.complete_message },
     );
 
-    // Auto-retry if under max retries
     if (payout.retryCount < this.MAX_RETRIES) {
       this.logger.log(
         `Auto-retrying payout ${payout.id} (${payout.retryCount + 1}/${this.MAX_RETRIES})`,
@@ -678,8 +693,17 @@ export class FlutterwaveService {
       qb.andWhere('p.status = :status', { status: query.status });
 
     const [payouts, total] = await qb.getManyAndCount();
+
+    // Decrypt bank account fields on each payout for the response
+    const decryptedPayouts = payouts.map((p) => ({
+      ...p,
+      bankAccount: p.bankAccount
+        ? this.encHelper.decryptBankAccount(p.bankAccount)
+        : null,
+    }));
+
     return {
-      data: payouts,
+      data: decryptedPayouts,
       total,
       page: query.page ?? 1,
       limit: query.limit ?? 20,
@@ -687,13 +711,19 @@ export class FlutterwaveService {
     };
   }
 
-  async getPayout(payoutId: string, userId: string): Promise<Payout> {
+  async getPayout(payoutId: string, userId: string): Promise<any> {
     const payout = await this.payoutRepo.findOne({
       where: { id: payoutId, userId },
       relations: ['bankAccount'],
     });
     if (!payout) throw new NotFoundException('Payout not found');
-    return payout;
+
+    return {
+      ...payout,
+      bankAccount: payout.bankAccount
+        ? this.encHelper.decryptBankAccount(payout.bankAccount)
+        : null,
+    };
   }
 
   // ── ADMIN: GET ALL PAYOUTS ────────────────────────────────────────────────────
@@ -712,8 +742,16 @@ export class FlutterwaveService {
       qb.andWhere('p.user_id = :userId', { userId: query.userId });
 
     const [payouts, total] = await qb.getManyAndCount();
+
+    const decryptedPayouts = payouts.map((p) => ({
+      ...p,
+      bankAccount: p.bankAccount
+        ? this.encHelper.decryptBankAccount(p.bankAccount)
+        : null,
+    }));
+
     return {
-      data: payouts,
+      data: decryptedPayouts,
       total,
       page: query.page ?? 1,
       limit: query.limit ?? 20,
@@ -815,14 +853,13 @@ export class FlutterwaveService {
 
   // ── PRIVATE: EXECUTE TRANSFER ─────────────────────────────────────────────────
   private async executeTransfer(params: {
-    accountNumber: string;
+    accountNumber: string; // expects plaintext (already decrypted by caller)
     bankCode: string;
     amount: number;
     narration: string;
     reference: string;
     currency: string;
   }): Promise<{ id: number; status: string; reference: string }> {
-    // Liquidity check before attempting disbursement
     const flwBalance = await this.getFlutterwaveBalance();
     if (flwBalance < params.amount) {
       this.logger.warn(
@@ -883,7 +920,7 @@ export class FlutterwaveService {
       );
       return Number(res.data.data?.[0]?.fee ?? 0);
     } catch {
-      return 26.88; // fallback flat fee
+      return 26.88;
     }
   }
 
