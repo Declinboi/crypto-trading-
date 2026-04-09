@@ -26,20 +26,14 @@ export class EncryptionHelper {
   constructor(private enc: EncryptionService) {}
 
   // ── User ──────────────────────────────────────────────────────────────────────
-  prepareUser(data: {
-    phone?: string | null;
-    verifiedName?: string | null;
-    twoFaSecret?: string | null;
-  }) {
+  prepareUser(data: { phone?: string | null; twoFaSecret?: string | null }) {
     const result: Record<string, any> = {};
 
     if (data.phone !== undefined) {
       result.phone = this.enc.encryptNullable(data.phone);
       result.phoneHash = data.phone ? this.enc.hash(data.phone) : null;
     }
-    if (data.verifiedName !== undefined) {
-      result.verifiedName = this.enc.encryptNullable(data.verifiedName);
-    }
+
     if (data.twoFaSecret !== undefined) {
       result.twoFaSecret = this.enc.encryptNullable(data.twoFaSecret);
     }
@@ -52,7 +46,6 @@ export class EncryptionHelper {
     return {
       ...user,
       phone: this.enc.decryptNullable(user.phone),
-      verifiedName: this.enc.decryptNullable(user.verifiedName),
       twoFaSecret: this.enc.decryptNullable(user.twoFaSecret),
     };
   }
@@ -135,8 +128,8 @@ export class EncryptionHelper {
     return {
       ...record,
       documentNumber: this.enc.decrypt(record.documentNumber),
-    //   documentFrontUrl: this.enc.decryptNullable(record.documentFrontUrl),
-    //   documentBackUrl: this.enc.decryptNullable(record.documentBackUrl),
+      //   documentFrontUrl: this.enc.decryptNullable(record.documentFrontUrl),
+      //   documentBackUrl: this.enc.decryptNullable(record.documentBackUrl),
       selfieUrl: this.enc.decryptNullable(record.selfieUrl),
       providerRef: this.enc.decryptNullable(record.providerRef),
       // bvnHash and ninHash are one-way — never decrypted

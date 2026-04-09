@@ -43,10 +43,8 @@ export class User {
   @Column({ type: 'varchar', length: 100, name: 'last_name' })
   lastName: string;
 
-  // ── ENCRYPTED — verified legal name from government ID ───────────────────────
-  // Stored encrypted; decrypted only when needed for display/KYC
   @Column({ type: 'text', name: 'verified_name', nullable: true })
-  verifiedName: string | null; // stored as AES-256-GCM ciphertext
+  verifiedName: string | null;
 
   // @Column({ type: 'text', name: 'avatar_url', nullable: true })
   // avatarUrl: string | null;
